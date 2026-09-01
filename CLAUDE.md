@@ -90,6 +90,19 @@ Newline-delimited JSON, one object per line, in both directions over the same US
 
 This is a first draft, not yet validated against real ESP32 firmware behavior on hardware — treat field names/ranges as easy to change once real testing starts.
 
+The web page also sends a `{"type": "ping"}` heartbeat every 200ms while its control socket is open — see "Motor safety" below for why.
+
+## Motor safety
+
+Two independent safeguards on the drive motors, each with its own tunable constant kept at the top of its file (and kept in sync across all three, called out in each one's comment):
+
+- **`MAX_MOTOR_PWM`** (`esp32_firmware.ino`, `esp32_bridge.py`, `index.html`; currently `200`/255) — hard ceiling on drive PWM, enforced authoritatively by the firmware regardless of what a command asks for. Start low and raise once direction/wiring are confirmed safe.
+- **`COMMAND_TIMEOUT_MS` / `COMMAND_TIMEOUT_S`** (`esp32_firmware.ino`, `esp32_bridge.py`; currently `500ms`) — deadman switch: if no command line (including a heartbeat ping) has arrived in this long, both drive motors are forced to stop. The **ESP32 firmware's own copy is the authoritative one** — it still protects the rig even if the Pi crashes or the USB link dies. `esp32_bridge.py --fake` implements an equivalent watchdog purely so the fake mode previews real behavior; it doesn't apply to the real serial connection since the firmware already handles that independently.
+- The web page's `HEARTBEAT_INTERVAL_MS` (currently `200ms`, must stay well under `COMMAND_TIMEOUT_MS`) keeps sending `{"type":"ping"}` as long as the control socket is open, so a motor deliberately held at a non-zero speed doesn't get cut just because no slider is actively moving.
+- `esp32_bridge.py` also sends an explicit stop-both-motors command the instant the last websocket client disconnects (`ws_handler`'s `finally` block) — a faster path than waiting on the firmware's own timeout, for the common case of "browser tab closed."
+
+None of this has been exercised against real motors — it's been verified against `--fake` (PWM clamping, deadman timeout, heartbeat keepalive, and disconnect-triggers-stop all checked with a scripted websocket client) and against the real HUD page's sliders in a browser. Confirm it behaves the same once real motors are wired up, and re-check `MAX_MOTOR_PWM` against what your drivetrain can actually handle safely.
+
 ## Repo layout
 
 - `pipeline/single_cam_stream.sh` — single-camera capture/encode script (current bench-test phase).
@@ -109,6 +122,7 @@ This is a first draft, not yet validated against real ESP32 firmware behavior on
 - Outdoor/weatherproofing needs for the camera housings not yet discussed.
 - Camera FOV mix (standard+wide vs. two standard) not decided, moot until camera #2 is bought.
 - Whether "fire"/"load" should stay plain 0–180° servo commands or need different (discrete/latching) semantics — current implementation treats them the same as any other servo.
+- **`MAX_MOTOR_PWM` (200) and `COMMAND_TIMEOUT_MS` (500ms)** in "Motor safety" above are starting guesses, not validated against a real drivetrain — re-check both once real motors are wired up.
 
 ## Conventions
 

@@ -24,6 +24,23 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 
+// =========================================================================
+// SAFETY LIMITS — tune these for your hardware. Keep MAX_MOTOR_PWM in sync
+// with MAX_MOTOR_PWM in web/static/index.html and control/esp32_bridge.py.
+// =========================================================================
+
+// Hard ceiling on drive motor PWM (out of 255), regardless of what a
+// command asks for. Start low and raise it once you've confirmed
+// direction/wiring are correct.
+const int MAX_MOTOR_PWM = 200;
+
+// Deadman switch: if no command line (including the HUD page's heartbeat
+// ping) has been received in this long, both drive motors are forced to
+// stop. Protects against a closed browser tab, dropped websocket, or dead
+// Pi/USB link leaving the motors running. Does not affect servos, which
+// just hold their last commanded position.
+const unsigned long COMMAND_TIMEOUT_MS = 500;
+
 // ---- Servo pins --------------------------------------------------------
 const int PIN_SERVO_PAN = 13;
 const int PIN_SERVO_TILT = 14;
@@ -67,7 +84,7 @@ void applyServo(const String &name, int pos) {
 }
 
 void applyMotor(const String &side, int dir, int pwm) {
-  pwm = constrain(pwm, 0, 255);
+  pwm = constrain(pwm, 0, MAX_MOTOR_PWM);
   dir = dir ? 1 : 0;
   if (side == "l") {
     motorL.dir = dir;
@@ -82,9 +99,15 @@ void applyMotor(const String &side, int dir, int pwm) {
   }
 }
 
+unsigned long lastCommandMs = 0;
+
 void handleCommandLine(const String &line) {
   JsonDocument doc;
   if (deserializeJson(doc, line) != DeserializationError::Ok) return;
+
+  // Any well-formed line — including a plain {"type":"ping"} heartbeat —
+  // counts as proof the link is alive and resets the deadman timer.
+  lastCommandMs = millis();
 
   const char *type = doc["type"] | "";
   if (strcmp(type, "servo") == 0) {
@@ -136,6 +159,8 @@ void setup() {
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   compass.begin();
+
+  lastCommandMs = millis();
 }
 
 unsigned long lastTelemetryMs = 0;
@@ -153,6 +178,14 @@ void loop() {
   }
 
   unsigned long now = millis();
+
+  if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
+    // Deadman: link's gone quiet, force the drive motors off. Re-asserted
+    // every loop while the timeout stays exceeded — cheap and idempotent.
+    applyMotor("l", 1, 0);
+    applyMotor("r", 1, 0);
+  }
+
   if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
     lastTelemetryMs = now;
     sensors_event_t event;

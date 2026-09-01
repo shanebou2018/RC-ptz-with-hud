@@ -12,11 +12,17 @@ control/esp32_firmware/) and the HUD web page.
   serial port, e.g.:
       {"type": "servo", "name": "pan", "pos": 90}
       {"type": "motor", "side": "l", "dir": 1, "pwm": 180}
+      {"type": "ping"}
   See control/esp32_firmware/esp32_firmware.ino for the exact fields each
-  command type expects.
+  command type expects. The HUD page sends a "ping" heartbeat every couple
+  hundred ms whenever the socket is open — it keeps the ESP32's deadman
+  timeout from tripping even while a motor is deliberately held at a
+  non-zero speed and no slider is actively moving.
 
 This makes the websocket a single shared channel: browser -> command ->
-ESP32, and ESP32 -> telemetry -> browser (fanned out to all clients).
+ESP32, and ESP32 -> telemetry -> browser (fanned out to all clients). If
+the last browser disconnects, both drive motors are stopped immediately
+(see stop_motor_lines()) rather than waiting on the ESP32's own timeout.
 
 Run against real hardware:
     python esp32_bridge.py --port /dev/ttyUSB0 --baud 115200
@@ -29,11 +35,30 @@ from the page update the simulated state and are reflected back):
 import argparse
 import asyncio
 import json
+import time
 
 import serial_asyncio
 import websockets
 
+# =============================================================================
+# SAFETY LIMITS — tune these for your hardware. Keep MAX_MOTOR_PWM in sync
+# with MAX_MOTOR_PWM in control/esp32_firmware/esp32_firmware.ino and
+# web/static/index.html. Only actually enforced here in --fake mode (the
+# real ESP32 enforces its own copy independently over serial — that's the
+# authoritative one); kept in sync here too so --fake accurately previews
+# real safety behavior.
+# =============================================================================
+MAX_MOTOR_PWM = 200
+COMMAND_TIMEOUT_S = 0.5  # matches esp32_firmware.ino's COMMAND_TIMEOUT_MS
+
 clients: set = set()
+
+
+def stop_motor_lines():
+    return [
+        json.dumps({"type": "motor", "side": "l", "dir": 1, "pwm": 0}),
+        json.dumps({"type": "motor", "side": "r", "dir": 1, "pwm": 0}),
+    ]
 
 
 async def broadcast(message: str) -> None:
@@ -81,16 +106,23 @@ class FakeEsp32:
             "servo": {"pan": 90, "tilt": 90, "focus": 0, "zoom": 0, "fire": 0, "load": 0},
             "motor": {"l": {"dir": 1, "pwm": 0}, "r": {"dir": 1, "pwm": 0}},
         }
+        self.last_command_ts = time.monotonic()
 
     def send_command(self, line: str) -> None:
         try:
             cmd = json.loads(line)
         except json.JSONDecodeError:
             return
+        # Any well-formed command — including a plain {"type":"ping"}
+        # heartbeat — counts as proof the link is alive.
+        self.last_command_ts = time.monotonic()
         if cmd.get("type") == "servo" and cmd.get("name") in self.state["servo"]:
             self.state["servo"][cmd["name"]] = cmd.get("pos", 0)
         elif cmd.get("type") == "motor" and cmd.get("side") in self.state["motor"]:
-            self.state["motor"][cmd["side"]] = {"dir": cmd.get("dir", 1), "pwm": cmd.get("pwm", 0)}
+            pwm = max(0, min(cmd.get("pwm", 0), MAX_MOTOR_PWM))
+            self.state["motor"][cmd["side"]] = {"dir": cmd.get("dir", 1), "pwm": pwm}
+        else:
+            return  # unrecognized/ping-only line, nothing changed to broadcast
         asyncio.create_task(broadcast(json.dumps(self.state)))
 
     async def spin_loop(self) -> None:
@@ -98,6 +130,18 @@ class FakeEsp32:
             self.state["hdg"] = (self.state["hdg"] + 2) % 360
             await broadcast(json.dumps(self.state))
             await asyncio.sleep(0.5)
+
+    async def watchdog_loop(self) -> None:
+        """Mirrors esp32_firmware.ino's deadman timeout, so --fake behaves
+        like real hardware would if the link goes quiet."""
+        while True:
+            await asyncio.sleep(0.1)
+            stale = time.monotonic() - self.last_command_ts > COMMAND_TIMEOUT_S
+            still_moving = any(m["pwm"] != 0 for m in self.state["motor"].values())
+            if stale and still_moving:
+                for side in self.state["motor"]:
+                    self.state["motor"][side] = {"dir": 1, "pwm": 0}
+                await broadcast(json.dumps(self.state))
 
 
 async def ws_handler(websocket, esp32) -> None:
@@ -107,6 +151,11 @@ async def ws_handler(websocket, esp32) -> None:
             esp32.send_command(message)
     finally:
         clients.discard(websocket)
+        if not clients:
+            # Last browser disconnected — stop the drive motors immediately
+            # rather than waiting on the ESP32's own deadman timeout.
+            for line in stop_motor_lines():
+                esp32.send_command(line)
 
 
 async def main() -> None:
@@ -127,6 +176,7 @@ async def main() -> None:
     if args.fake:
         esp32 = FakeEsp32()
         loop.create_task(esp32.spin_loop())
+        loop.create_task(esp32.watchdog_loop())
     else:
         _, esp32 = await serial_asyncio.create_serial_connection(
             loop, Esp32BridgeProtocol, args.port, baudrate=args.baud

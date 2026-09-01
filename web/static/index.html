@@ -55,8 +55,8 @@
 
     <fieldset>
       <legend>DRIVE</legend>
-      <div class="motor-row"><label>LEFT</label><input type="range" min="-255" max="255" value="0" data-motor="l"><output>0</output></div>
-      <div class="motor-row"><label>RIGHT</label><input type="range" min="-255" max="255" value="0" data-motor="r"><output>0</output></div>
+      <div class="motor-row"><label>LEFT</label><input type="range" value="0" data-motor="l"><output>0</output></div>
+      <div class="motor-row"><label>RIGHT</label><input type="range" value="0" data-motor="r"><output>0</output></div>
       <div class="btn-row">
         <button id="stopBtn">ALL STOP</button>
       </div>
@@ -71,6 +71,14 @@
     const MEDIAMTX_WEBRTC_PORT = 8889;
     const STREAM_PATH = "robot";
     const CONTROL_WS_PORT = 8765;
+
+    // ---- Safety limits — tune these for your hardware. Keep MAX_MOTOR_PWM
+    // in sync with MAX_MOTOR_PWM in control/esp32_firmware/esp32_firmware.ino
+    // and control/esp32_bridge.py. HEARTBEAT_INTERVAL_MS must stay well
+    // under the firmware's COMMAND_TIMEOUT_MS (500ms) or the deadman switch
+    // will cut the motors while you're still actively driving. ------------
+    const MAX_MOTOR_PWM = 200;
+    const HEARTBEAT_INTERVAL_MS = 200;
 
     const statusEl = document.getElementById("status");
 
@@ -142,7 +150,7 @@
     function drawMotorBar(ctx, x, y, w, h, label, dir, pwm) {
       ctx.strokeStyle = "#0f0";
       ctx.strokeRect(x, y, w, h);
-      const frac = Math.max(0, Math.min(1, pwm / 255));
+      const frac = Math.max(0, Math.min(1, pwm / MAX_MOTOR_PWM));
       const barH = h * frac;
       ctx.fillStyle = dir ? "#0f0" : "#0a0";
       ctx.fillRect(x, y + h - barH, w, barH);
@@ -223,6 +231,8 @@
       });
 
       document.querySelectorAll("input[data-motor]").forEach((input) => {
+        input.min = -MAX_MOTOR_PWM;
+        input.max = MAX_MOTOR_PWM;
         const output = input.nextElementSibling;
         input.addEventListener("input", () => {
           output.textContent = input.value;
@@ -250,6 +260,10 @@
     startControlSocket();
     wireControls();
     requestAnimationFrame(render);
+
+    // Keeps the ESP32's deadman timeout from tripping while a motor is
+    // deliberately held at a non-zero speed and no slider is moving.
+    setInterval(() => sendCommand({ type: "ping" }), HEARTBEAT_INTERVAL_MS);
   </script>
 </body>
 </html>
