@@ -1,0 +1,14 @@
+# Minimal MediaMTX config for the RC PTZ HUD project.
+# Full reference: https://github.com/bluenviron/mediamtx/blob/main/mediamtx.yml
+#
+# Exposes:
+#   rtsp://<pi>:8554/robot        - for VLC, QGroundControl, any RTSP client
+#   http://<pi>:8889/robot        - WebRTC (WHEP) viewer page served by MediaMTX itself
+#   http://<pi>:8889/robot/whep   - WHEP endpoint the web app's <video> connects to
+
+rtspAddress: :8554
+webrtcAddress: :8889
+
+paths:
+  robot:
+    source: publisher

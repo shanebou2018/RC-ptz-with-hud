@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>RC PTZ HUD</title>
+  <style>
+    html, body { margin: 0; background: #000; height: 100%; }
+    .stage { position: relative; width: 1280px; height: 720px; margin: 0 auto; }
+    video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    canvas { pointer-events: none; }
+    #status { position: absolute; top: 8px; right: 12px; color: #0f0; font: 14px monospace; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="hud" width="1280" height="720"></canvas>
+    <div id="status">connecting…</div>
+  </div>
+
+  <script>
+    // MediaMTX serves its own WHEP endpoint; the browser talks to it
+    // directly, not through this FastAPI app. Adjust the port if MediaMTX's
+    // webrtcAddress differs from the default in mediamtx/mediamtx.yml.
+    const MEDIAMTX_HOST = location.hostname;
+    const MEDIAMTX_WEBRTC_PORT = 8889;
+    const STREAM_PATH = "robot";
+    const TELEMETRY_WS_PORT = 8765;
+
+    const statusEl = document.getElementById("status");
+
+    async function startVideo() {
+      const pc = new RTCPeerConnection();
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.ontrack = (event) => {
+        document.getElementById("video").srcObject = event.streams[0];
+        statusEl.textContent = "live";
+      };
+      pc.onconnectionstatechange = () => {
+        if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
+          statusEl.textContent = pc.connectionState;
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const whepUrl = `http://${MEDIAMTX_HOST}:${MEDIAMTX_WEBRTC_PORT}/${STREAM_PATH}/whep`;
+      const res = await fetch(whepUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp" },
+        body: offer.sdp,
+      });
+      if (!res.ok) {
+        statusEl.textContent = `WHEP error ${res.status}`;
+        return;
+      }
+      const answerSdp = await res.text();
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    }
+
+    function startTelemetry() {
+      const ctx = document.getElementById("hud").getContext("2d");
+      const ws = new WebSocket(`ws://${location.hostname}:${TELEMETRY_WS_PORT}`);
+
+      ws.onmessage = (event) => {
+        const t = JSON.parse(event.data);
+        ctx.clearRect(0, 0, 1280, 720);
+        ctx.font = "20px monospace";
+        ctx.fillStyle = "#0f0";
+        ctx.fillText(`HDG ${Number(t.hdg).toFixed(0)}°  SPD ${Number(t.speed).toFixed(1)} m/s`, 20, 30);
+        ctx.fillText(`SERVO ${t.servo}`, 20, 55);
+        ctx.fillText(`${Number(t.lat).toFixed(6)}, ${Number(t.lon).toFixed(6)}`, 20, 80);
+      };
+      ws.onerror = () => { statusEl.textContent = "telemetry ws error"; };
+    }
+
+    startVideo();
+    startTelemetry();
+  </script>
+</body>
+</html>

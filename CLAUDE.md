@@ -6,7 +6,7 @@ This file gives Claude Code (and any other AI assistant) the context needed to w
 
 RC-ptz-with-hud: a Raspberry Pi 5 based pan/tilt/zoom (PTZ) camera rig with a live heads-up display (HUD), built for an RC vehicle or similar remote platform.
 
-Status: **greenfield** — no code has been written yet. This file exists ahead of implementation to record the intended goal and shape so future sessions (and the human) stay aligned as pieces get built.
+Status: **early scaffolding** — the video pipeline, telemetry service, and web HUD have starter implementations (see Repo layout), but none of it has been run against real hardware yet. Treat everything here as the working plan, and correct it as real hardware testing reveals problems.
 
 ## Goal
 
@@ -19,29 +19,68 @@ Status: **greenfield** — no code has been written yet. This file exists ahead 
    - Speed
    - GPS latitude and longitude
 
-## Target hardware (as currently understood)
+## Key architectural decision: HUD is not burned into the RTSP feed
 
-- Raspberry Pi 5
-- Two CSI (or USB) cameras
-- Pan/tilt servos (driven via PWM, e.g. through a PCA9685 or the Pi's own PWM)
-- A compass/heading sensor (e.g. magnetometer/IMU, such as an HMC5883L, QMC5883L, or a combined IMU)
-- A GPS module (for lat/long and speed) — speed may instead/also be derived from GPS ground speed or wheel/motor telemetry
-- Exact part numbers and wiring are not yet finalized; confirm with the user before assuming a specific sensor/board and update this section once hardware is locked in.
+The HUD is rendered **client-side** on an HTML `<canvas>` layered over the video element on the web page, driven by a live telemetry websocket — it is *not* composited into the video frames. This keeps:
 
-## Architecture (proposed, not yet implemented)
+- The RTSP stream clean (for VLC/QGroundControl/any generic RTSP client) with zero HUD-related re-encode cost.
+- The HUD independently updatable/restylable without touching the video pipeline.
 
-This is a starting proposal, not a decision — revisit and correct once real implementation begins:
+If HUD-baked-into-video is ever needed (e.g. for DVR recordings), that's an *additional* GStreamer overlay stage layered on later — not part of the initial build.
 
-- **Capture & compositing**: `libcamera`/`rpicam-apps` or GStreamer (`gst-launch`/`gstreamer` Python bindings) to pull both camera feeds and composite a PIP layout.
-- **RTSP output**: GStreamer `rtspclientsink`, or a dedicated RTSP server such as `mediamtx` fed by a GStreamer/ffmpeg pipeline.
-- **Web page**: a small backend (Python, e.g. FastAPI/Flask) serving the page and a telemetry channel (WebSocket or Server-Sent Events) for live servo/compass/speed/GPS values; video shown via an embedded RTSP-to-web bridge (e.g. WebRTC via mediamtx, or an MJPEG fallback) since browsers can't play RTSP natively.
-- **HUD rendering**: overlay drawn client-side on an HTML `<canvas>`/SVG layered over the video element, driven by the live telemetry feed — keeps the HUD independent of the video pipeline and easy to restyle.
-- **Telemetry sources**: a small Python service reading the compass/GPS/servo state (from I2C/UART/PWM feedback) and publishing it to the web backend.
+## Hardware
 
-None of this is committed yet — treat it as a sensible default to start from and change freely as constraints appear (e.g. if RTSP-to-browser latency is a problem, or if the compositing is better done as two independent streams with CSS-based PIP in the browser instead of a server-side composite).
+- **Compute**: Raspberry Pi 5.
+- **Cameras**: 2x Raspberry Pi Camera Module 3 (12MP, Sony IMX708, autofocus), one per native CSI port (Pi 5 has two — CAM/DISP0 and CAM/DISP1 — no splitter needed). Mix of standard + wide FOV, or two standard, depending on what each camera is used for. Camera Module 3 ships with a short (~200mm) FPC cable; buy longer (300–500mm) cables separately for chassis routing, and keep spares — these cables are the most fragile part of the build.
+  - **Zoom**: start with digital crop (~2–3x usable from the 12MP sensor) — no architecture change needed. Optical/motorized zoom is a different hardware class (own ISP/encoder, usually USB/IP output that would bypass GStreamer compositing) — only pursue if digital crop proves insufficient.
+  - **Low light**: if daytime-only, skip NoIR. If night operation is needed, get the NoIR variant plus an external IR illuminator (no onboard IR LEDs on the module).
+- **Servo / telemetry controller**: STM32H7 (Nucleo-H743ZI to start) — chosen for independent hardware watchdog (own RC oscillator, separate clock domain), dual-bank flash (safe firmware updates), brownout detection, and hardware timers that drive PWM independent of CPU load (no jitter from a busy WiFi stack, etc). Reads compass/IMU + GPS and drives the pan/tilt servos, then reports state to the Pi over UART.
+- **Compass/IMU**: BNO055 or BNO085, on the STM32H7 (I2C), folded into the same UART telemetry stream to the Pi. (Could instead go directly to the Pi over I2C if that's more convenient physically — not yet decided.)
+- **GPS**: not yet chosen — needs a UART/I2C GPS module (u-blox NEO-6M/M8N are the easy default) either on the STM32H7 board feeding the same telemetry line, or wired directly to the Pi 5. Speed can come from GPS ground speed and/or motor/wheel telemetry.
+- **Pan/tilt servos**: driven by the STM32H7's hardware PWM timers.
+
+Confirm with the user before changing any of the above, and update this section as parts get locked in.
+
+## Video pipeline constraint: Pi 5 has no hardware H.264 encoder
+
+Broadcom pulled the encode block for Pi 5 (decode-only VPU now) — two camera streams + PiP compositing + encode is all CPU (`x264enc` software encode). At 1080p30 x2 this will pin cores. Plan on **720p15–20 per camera** for the PiP composite, or MJPEG if dodging encoder cost matters more than bandwidth.
+
+## Architecture
+
+```
+Cam0 (CSI) ──┐
+             ├─ libcamera → GStreamer compositor (PiP) → x264enc (software) → rtspclientsink → MediaMTX
+Cam1 (CSI) ──┘                                                                                      │
+                                                                                     WebRTC (WHEP) out ──► browser <video>
+STM32H7 (servo, compass, GPS) ──UART──► Python serial reader ──► websocket ──► canvas HUD overlay on web page
+```
+
+- **MediaMTX** (formerly rtsp-simple-server) is the RTSP/WebRTC server — a single pre-built binary, config-only, not something we write. Handles both RTSP consumers (`rtsp://<pi>:8554/robot`) and gives a WebRTC (WHEP) endpoint for the web page (`http://<pi>:8889/robot`) for free.
+- **GStreamer** does capture + PiP compositing + encode, and pushes to MediaMTX via `rtspclientsink`. See `pipeline/pip_stream.sh`.
+- **Web app** (FastAPI) serves the HUD page: embeds a MediaMTX WHEP video player + a canvas HUD layer on top, driven by telemetry over a websocket. See `web/`.
+- **Telemetry service**: a Python asyncio service reading line-delimited JSON off the STM32H7's UART and fanning it out to connected websocket clients. See `telemetry/`.
+
+PiP toggle (swap which camera is the inset) should be done live via the GStreamer `compositor` pads' `xpos`/`ypos`/`width`/`height`/`zorder` properties (dynamic property push), not by rebuilding the pipeline.
+
+## Repo layout
+
+- `pipeline/pip_stream.sh` — GStreamer launch script: dual `libcamerasrc` → `compositor` (PiP layout) → `x264enc` → `rtspclientsink` into MediaMTX.
+- `mediamtx/mediamtx.yml` — MediaMTX config (RTSP + WebRTC/WHEP, `robot` path).
+- `telemetry/server.py` — reads UART telemetry from the STM32H7, broadcasts line-delimited JSON over a websocket.
+- `web/` — FastAPI app serving the HUD page (`web/static/index.html`): WHEP video embed + canvas HUD driven by the telemetry websocket.
+- `systemd/` — starter unit files for running MediaMTX, the GStreamer pipeline, the telemetry service, and the web app as services on the Pi.
+
+## Open gaps (confirm before assuming)
+
+- **UART telemetry framing** between the STM32H7 firmware and the Pi-side parser is not finalized — `telemetry/server.py` currently assumes line-delimited JSON (`{"servo":..,"hdg":..,"speed":..,"lat":..,"lon":..}`) as a placeholder. Nail this down with whoever owns the STM32 firmware before it's load-bearing.
+- GPS module part not chosen.
+- Compass/IMU placement (on STM32H7 vs. direct to Pi I2C) not decided.
+- Outdoor/weatherproofing needs for the camera housings not yet discussed.
+- Camera FOV mix (standard+wide vs. two standard) not decided.
 
 ## Conventions
 
-- No language/framework has been chosen yet beyond the proposal above. Prefer Python for Pi-side capture/telemetry (best support for `picamera2`/`libcamera` and GPIO/I2C libraries) unless a strong reason emerges to do otherwise.
-- Keep the video pipeline and the telemetry/HUD pipeline decoupled where practical, so each can be developed and tested independently (e.g. HUD can be built against fake/simulated telemetry before real sensors are wired up).
-- As real directories, services, and run/build commands appear, document them here (how to run the capture service, the web server, how to test on a dev machine without a Pi attached, etc.).
+- Prefer Python for Pi-side capture/telemetry (best support for `picamera2`/`libcamera` and GPIO/I2C libraries) and for the web backend (FastAPI).
+- Keep the video pipeline and the telemetry/HUD pipeline decoupled — each should be developed and tested independently (e.g. the HUD can be built and iterated against fake/simulated telemetry before real sensors are wired up; use a small script that fakes the UART JSON stream over the websocket for this).
+- This project targets real Pi 5 + camera + STM32 hardware — most of it cannot be fully verified in a dev-machine-only session. Say so explicitly rather than claiming something works when only the code was written, not run on hardware.
+- As run/build commands solidify, document them here (how to start each service, how to test on a dev machine without a Pi attached, systemd unit install steps, etc.).

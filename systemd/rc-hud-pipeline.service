@@ -1,0 +1,13 @@
+[Unit]
+Description=RC PTZ HUD - dual-camera PiP capture/encode pipeline
+After=network.target rc-hud-mediamtx.service
+Requires=rc-hud-mediamtx.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rc-ptz-with-hud
+ExecStart=/opt/rc-ptz-with-hud/pipeline/pip_stream.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

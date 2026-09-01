@@ -1,0 +1,13 @@
+[Unit]
+Description=RC PTZ HUD - MediaMTX (RTSP/WebRTC server)
+After=network.target
+
+[Service]
+Type=simple
+# Adjust to wherever the mediamtx binary and mediamtx/mediamtx.yml actually live.
+WorkingDirectory=/opt/rc-ptz-with-hud
+ExecStart=/opt/rc-ptz-with-hud/mediamtx/mediamtx /opt/rc-ptz-with-hud/mediamtx/mediamtx.yml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
