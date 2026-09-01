@@ -4,18 +4,63 @@
   <meta charset="utf-8" />
   <title>RC PTZ HUD</title>
   <style>
-    html, body { margin: 0; background: #000; height: 100%; }
+    html, body { margin: 0; background: #000; color: #0f0; font: 13px monospace; }
     .stage { position: relative; width: 1280px; height: 720px; margin: 0 auto; }
-    video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-    canvas { pointer-events: none; }
-    #status { position: absolute; top: 8px; right: 12px; color: #0f0; font: 14px monospace; }
+    video, canvas.hud { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    canvas.hud { pointer-events: none; }
+    #status { position: absolute; top: 8px; right: 12px; }
+
+    #controls {
+      width: 1280px;
+      margin: 12px auto;
+      display: flex;
+      gap: 32px;
+      align-items: flex-start;
+    }
+    #controls fieldset { border: 1px solid #0a0; color: #0f0; }
+    #controls legend { padding: 0 4px; }
+    .servo-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .servo-row label { width: 50px; display: inline-block; }
+    .servo-row output { width: 32px; display: inline-block; text-align: right; }
+    .btn-row { display: flex; gap: 8px; margin-top: 8px; }
+    button {
+      background: #010; color: #0f0; border: 1px solid #0f0;
+      font: 13px monospace; padding: 4px 10px; cursor: pointer;
+    }
+    button.active { background: #0f0; color: #010; }
+    .motor-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .motor-row label { width: 50px; }
+    .motor-row input[type=range] { width: 160px; }
   </style>
 </head>
 <body>
   <div class="stage">
     <video id="video" autoplay muted playsinline></video>
-    <canvas id="hud" width="1280" height="720"></canvas>
+    <canvas id="hud" class="hud" width="1280" height="720"></canvas>
     <div id="status">connecting…</div>
+  </div>
+
+  <div id="controls">
+    <fieldset>
+      <legend>SERVOS</legend>
+      <div class="servo-row"><label>PAN</label><input type="range" min="0" max="180" value="90" data-servo="pan"><output>90</output></div>
+      <div class="servo-row"><label>TILT</label><input type="range" min="0" max="180" value="90" data-servo="tilt"><output>90</output></div>
+      <div class="servo-row"><label>FOCUS</label><input type="range" min="0" max="180" value="0" data-servo="focus"><output>0</output></div>
+      <div class="servo-row"><label>ZOOM</label><input type="range" min="0" max="180" value="0" data-servo="zoom"><output>0</output></div>
+      <div class="btn-row">
+        <button id="fireBtn" data-servo-toggle="fire">FIRE</button>
+        <button id="loadBtn" data-servo-toggle="load">LOAD</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>DRIVE</legend>
+      <div class="motor-row"><label>LEFT</label><input type="range" min="-255" max="255" value="0" data-motor="l"><output>0</output></div>
+      <div class="motor-row"><label>RIGHT</label><input type="range" min="-255" max="255" value="0" data-motor="r"><output>0</output></div>
+      <div class="btn-row">
+        <button id="stopBtn">ALL STOP</button>
+      </div>
+    </fieldset>
   </div>
 
   <script>
@@ -25,7 +70,7 @@
     const MEDIAMTX_HOST = location.hostname;
     const MEDIAMTX_WEBRTC_PORT = 8889;
     const STREAM_PATH = "robot";
-    const TELEMETRY_WS_PORT = 8765;
+    const CONTROL_WS_PORT = 8765;
 
     const statusEl = document.getElementById("status");
 
@@ -34,11 +79,10 @@
       pc.addTransceiver("video", { direction: "recvonly" });
       pc.ontrack = (event) => {
         document.getElementById("video").srcObject = event.streams[0];
-        statusEl.textContent = "live";
       };
       pc.onconnectionstatechange = () => {
         if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
-          statusEl.textContent = pc.connectionState;
+          statusEl.textContent = "video: " + pc.connectionState;
         }
       };
 
@@ -59,24 +103,153 @@
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
     }
 
-    function startTelemetry() {
-      const ctx = document.getElementById("hud").getContext("2d");
-      const ws = new WebSocket(`ws://${location.hostname}:${TELEMETRY_WS_PORT}`);
+    // ---- Compass dial + servo/motor readout on the canvas -----------------
 
+    function drawCompass(ctx, cx, cy, r, hdg) {
+      ctx.strokeStyle = "#0f0";
+      ctx.fillStyle = "#0f0";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.font = "13px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const ticks = [
+        ["N", 0], ["30", 30], ["60", 60], ["E", 90], ["120", 120], ["150", 150],
+        ["S", 180], ["210", 210], ["240", 240], ["W", 270], ["300", 300], ["330", 330],
+      ];
+      for (const [label, deg] of ticks) {
+        const rel = (deg - hdg) * Math.PI / 180;
+        const x = cx + Math.sin(rel) * (r - 14);
+        const y = cy - Math.cos(rel) * (r - 14);
+        ctx.fillText(label, x, y);
+      }
+
+      // fixed needle: always points up, marks current heading
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - r + 4);
+      ctx.lineTo(cx - 6, cy - r + 18);
+      ctx.lineTo(cx + 6, cy - r + 18);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.font = "16px monospace";
+      ctx.fillText(`${hdg.toFixed(0)}°`, cx, cy);
+    }
+
+    function drawMotorBar(ctx, x, y, w, h, label, dir, pwm) {
+      ctx.strokeStyle = "#0f0";
+      ctx.strokeRect(x, y, w, h);
+      const frac = Math.max(0, Math.min(1, pwm / 255));
+      const barH = h * frac;
+      ctx.fillStyle = dir ? "#0f0" : "#0a0";
+      ctx.fillRect(x, y + h - barH, w, barH);
+      ctx.fillStyle = "#0f0";
+      ctx.font = "12px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(label, x + w / 2, y + h + 14);
+      ctx.fillText(dir ? "FWD" : "REV", x + w / 2, y - 8);
+    }
+
+    function drawServoReadout(ctx, x, y, servo) {
+      ctx.textAlign = "left";
+      ctx.font = "16px monospace";
+      const lines = [
+        `PAN   ${servo.pan}°`,
+        `TILT  ${servo.tilt}°`,
+        `FOCUS ${servo.focus}°`,
+        `ZOOM  ${servo.zoom}°`,
+        `FIRE  ${servo.fire ? "ARMED" : "safe"}`,
+        `LOAD  ${servo.load ? "LOADED" : "empty"}`,
+      ];
+      lines.forEach((line, i) => ctx.fillText(line, x, y + i * 22));
+    }
+
+    let latestTelemetry = null;
+
+    function render() {
+      const canvas = document.getElementById("hud");
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (latestTelemetry) {
+        const t = latestTelemetry;
+        drawCompass(ctx, 1180, 80, 60, t.hdg ?? 0);
+        drawMotorBar(ctx, 40, 480, 40, 120, "L", t.motor?.l?.dir ?? 1, t.motor?.l?.pwm ?? 0);
+        drawMotorBar(ctx, 100, 480, 40, 120, "R", t.motor?.r?.dir ?? 1, t.motor?.r?.pwm ?? 0);
+        drawServoReadout(ctx, 20, 30, t.servo ?? {});
+        ctx.fillStyle = "#0a0";
+        ctx.font = "13px monospace";
+        ctx.textAlign = "left";
+        ctx.fillText("GPS -- / -- (not wired up yet)", 20, 690);
+      }
+      requestAnimationFrame(render);
+    }
+
+    // ---- Control websocket: receives telemetry, sends commands -----------
+
+    let ws;
+    function startControlSocket() {
+      ws = new WebSocket(`ws://${location.hostname}:${CONTROL_WS_PORT}`);
+      ws.onopen = () => { statusEl.textContent = "live"; };
+      ws.onclose = () => { statusEl.textContent = "control ws closed"; };
+      ws.onerror = () => { statusEl.textContent = "control ws error"; };
       ws.onmessage = (event) => {
-        const t = JSON.parse(event.data);
-        ctx.clearRect(0, 0, 1280, 720);
-        ctx.font = "20px monospace";
-        ctx.fillStyle = "#0f0";
-        ctx.fillText(`HDG ${Number(t.hdg).toFixed(0)}°  SPD ${Number(t.speed).toFixed(1)} m/s`, 20, 30);
-        ctx.fillText(`SERVO ${t.servo}`, 20, 55);
-        ctx.fillText(`${Number(t.lat).toFixed(6)}, ${Number(t.lon).toFixed(6)}`, 20, 80);
+        latestTelemetry = JSON.parse(event.data);
       };
-      ws.onerror = () => { statusEl.textContent = "telemetry ws error"; };
+    }
+
+    function sendCommand(cmd) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(cmd));
+      }
+    }
+
+    function wireControls() {
+      document.querySelectorAll("input[data-servo]").forEach((input) => {
+        const output = input.nextElementSibling;
+        input.addEventListener("input", () => {
+          output.textContent = input.value;
+          sendCommand({ type: "servo", name: input.dataset.servo, pos: Number(input.value) });
+        });
+      });
+
+      document.querySelectorAll("button[data-servo-toggle]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const on = btn.classList.toggle("active");
+          sendCommand({ type: "servo", name: btn.dataset.servoToggle, pos: on ? 180 : 0 });
+        });
+      });
+
+      document.querySelectorAll("input[data-motor]").forEach((input) => {
+        const output = input.nextElementSibling;
+        input.addEventListener("input", () => {
+          output.textContent = input.value;
+          const value = Number(input.value);
+          sendCommand({
+            type: "motor",
+            side: input.dataset.motor,
+            dir: value >= 0 ? 1 : 0,
+            pwm: Math.abs(value),
+          });
+        });
+      });
+
+      document.getElementById("stopBtn").addEventListener("click", () => {
+        document.querySelectorAll("input[data-motor]").forEach((input) => {
+          input.value = 0;
+          input.nextElementSibling.textContent = "0";
+        });
+        sendCommand({ type: "motor", side: "l", dir: 1, pwm: 0 });
+        sendCommand({ type: "motor", side: "r", dir: 1, pwm: 0 });
+      });
     }
 
     startVideo();
-    startTelemetry();
+    startControlSocket();
+    wireControls();
+    requestAnimationFrame(render);
   </script>
 </body>
 </html>

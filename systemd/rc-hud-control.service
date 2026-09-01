@@ -1,0 +1,14 @@
+[Unit]
+Description=RC PTZ HUD - ESP32 serial control/telemetry bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rc-ptz-with-hud/control
+# Uses whatever python/venv the deploy sets up; adjust the interpreter path
+# to a venv with control/requirements.txt installed.
+ExecStart=/opt/rc-ptz-with-hud/control/.venv/bin/python esp32_bridge.py --port /dev/ttyUSB0 --baud 115200
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
