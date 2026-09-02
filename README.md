@@ -11,20 +11,32 @@ protocol, and open gaps — this README is just the quick-start.
 
 ## Status
 
-Early scaffolding, working toward a first bench test: one Pi 5, one camera,
-one ESP32 (motors + 6 servos + compass), and the HUD web page. The HUD
-page's controls and telemetry readout have been verified end-to-end against
-a simulated ESP32 (`control/esp32_bridge.py --fake`) — dragging a slider in
-the browser round-trips through the bridge and updates the canvas readout.
-Nothing involving actual cameras, GStreamer, MediaMTX, or real ESP32
-hardware has been run yet.
+First bench test in progress: one Pi 5, one camera, one ESP32 (motors + 6
+servos + compass), and the HUD web page.
+
+**Verified on real Pi 5 hardware:** the single-camera pipeline —
+`pipeline/single_cam_stream.sh` streaming camera → MediaMTX → confirmed live
+in VLC over RTSP. Along the way we found GStreamer's `rtspclientsink` isn't
+available on Debian trixie (it ships in GStreamer's Rust plugin set, which
+isn't packaged there), so the script uses `rpicam-vid`'s built-in `libav`
+RTSP push instead — see `CLAUDE.md` for the full story.
+
+**Verified without hardware:** the HUD page's controls and telemetry readout
+end-to-end against a simulated ESP32 (`control/esp32_bridge.py --fake`) —
+dragging a slider in the browser round-trips through the bridge and updates
+the canvas readout.
+
+**Not yet touched:** the ESP32 firmware/serial link, `pip_stream.sh`
+(dual-camera — still has the same `rtspclientsink` problem, needs the same
+rework), and the actual HUD page's WHEP video embed (only raw RTSP via VLC
+has been confirmed so far).
 
 ## Layout
 
 ```
-pipeline/     GStreamer capture + encode scripts
-              - single_cam_stream.sh  (current: one camera, no compositor)
-              - pip_stream.sh         (dual-camera PiP, once camera #2 exists)
+pipeline/     Capture + encode scripts
+              - single_cam_stream.sh  (current: rpicam-vid, one camera, no compositor)
+              - pip_stream.sh         (dual-camera GStreamer PiP — needs rework, see CLAUDE.md)
 mediamtx/     MediaMTX (RTSP/WebRTC server) config
 control/      Pi <-> ESP32 bridge (serial <-> websocket) + the ESP32 firmware sketch
 web/          FastAPI app serving the HUD page (canvas overlay + WHEP video + controls)
@@ -38,13 +50,16 @@ systemd/      Starter unit files for running everything as services on the Pi
    ```
    mediamtx mediamtx/mediamtx.yml
    ```
-2. Find your camera ID and set it in `pipeline/single_cam_stream.sh` (or via
-   an env var), then start the capture pipeline:
+2. Find your camera's numeric index and set it in `pipeline/single_cam_stream.sh`
+   (or via an env var), then start the capture pipeline:
    ```
-   rpicam-hello --list-cameras   # or libcamera-hello --list-cameras
-   CAM=<id0> ./pipeline/single_cam_stream.sh
+   rpicam-hello --list-cameras   # note the index, e.g. "0" in "0 : ov5647 [...]"
+   CAM=0 ./pipeline/single_cam_stream.sh
    ```
-   Check the stream with `vlc rtsp://<pi>:8554/robot`.
+   Check the stream with `vlc rtsp://<pi>:8554/robot` (expect a few seconds
+   of latency in VLC by default — that's normal RTSP/network-caching
+   behavior, not a pipeline problem; the HUD page's WebRTC path should be
+   lower-latency, though that hasn't been tested yet).
 3. Flash `control/esp32_firmware/esp32_firmware.ino` to the ESP32 (Arduino
    IDE or `arduino-cli`; needs the ESP32Servo, ArduinoJson, and Adafruit
    BNO055/Unified Sensor libraries — see the sketch's header comment), then
