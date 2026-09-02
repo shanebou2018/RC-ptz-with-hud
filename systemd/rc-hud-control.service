@@ -4,11 +4,14 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/rc-ptz-with-hud/control
-# Uses whatever python/venv the deploy sets up; adjust the interpreter path
-# to a venv with control/requirements.txt installed.
-ExecStart=/opt/rc-ptz-with-hud/control/.venv/bin/python esp32_bridge.py --port /dev/ttyUSB0 --baud 115200
+User=admincam
+WorkingDirectory=/home/admincam/RC-ptz-with-hud/control
+# --fake until the ESP32 is actually wired up and flashed (see CLAUDE.md).
+# Once it is, switch this to:
+#   esp32_bridge.py --port /dev/ttyUSB0 --baud 115200
+ExecStart=/home/admincam/RC-ptz-with-hud/control/.venv/bin/python esp32_bridge.py --fake
 Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target

@@ -4,9 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/rc-ptz-with-hud/web
-ExecStart=/opt/rc-ptz-with-hud/web/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+User=admincam
+WorkingDirectory=/home/admincam/RC-ptz-with-hud/web
+ExecStart=/home/admincam/RC-ptz-with-hud/web/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000
 Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target

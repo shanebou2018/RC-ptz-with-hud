@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-# Adjust to wherever the mediamtx binary and mediamtx/mediamtx.yml actually live.
-WorkingDirectory=/opt/rc-ptz-with-hud
-ExecStart=/opt/rc-ptz-with-hud/mediamtx/mediamtx /opt/rc-ptz-with-hud/mediamtx/mediamtx.yml
+User=admincam
+WorkingDirectory=/home/admincam/mediamtx
+ExecStart=/home/admincam/mediamtx/mediamtx /home/admincam/RC-ptz-with-hud/mediamtx/mediamtx.yml
 Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
