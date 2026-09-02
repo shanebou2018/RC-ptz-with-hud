@@ -14,22 +14,25 @@ protocol, and open gaps — this README is just the quick-start.
 First bench test in progress: one Pi 5, one camera, one ESP32 (motors + 6
 servos + compass), and the HUD web page.
 
-**Verified on real Pi 5 hardware:** the single-camera pipeline —
-`pipeline/single_cam_stream.sh` streaming camera → MediaMTX → confirmed live
-in VLC over RTSP. Along the way we found GStreamer's `rtspclientsink` isn't
-available on Debian trixie (it ships in GStreamer's Rust plugin set, which
-isn't packaged there), so the script uses `rpicam-vid`'s built-in `libav`
-RTSP push instead — see `CLAUDE.md` for the full story.
+**Verified on real Pi 5 hardware — the full single-camera + HUD stack works
+end-to-end:** the camera pipeline (`pipeline/single_cam_stream.sh` → MediaMTX,
+confirmed live in VLC over RTSP), *and* the actual HUD web page itself —
+live video via MediaMTX's WebRTC (WHEP) embed, the compass dial, servo
+readout, motor bars, and on-screen controls all working against
+`control/esp32_bridge.py --fake` running on the Pi. Along the way we found
+GStreamer's `rtspclientsink` isn't available on Debian trixie (it ships in
+GStreamer's Rust plugin set, which isn't packaged there), so the pipeline
+script uses `rpicam-vid`'s built-in `libav` RTSP push instead — see
+`CLAUDE.md` for the full story.
 
-**Verified without hardware:** the HUD page's controls and telemetry readout
-end-to-end against a simulated ESP32 (`control/esp32_bridge.py --fake`) —
-dragging a slider in the browser round-trips through the bridge and updates
-the canvas readout.
+**Not yet touched:** the ESP32 firmware/serial link (still simulated via
+`--fake`) and `pip_stream.sh` (dual-camera — still has the same
+`rtspclientsink` problem, needs the same rework).
 
-**Not yet touched:** the ESP32 firmware/serial link, `pip_stream.sh`
-(dual-camera — still has the same `rtspclientsink` problem, needs the same
-rework), and the actual HUD page's WHEP video embed (only raw RTSP via VLC
-has been confirmed so far).
+Running all of this requires 4 long-running processes at once (MediaMTX, the
+camera pipeline, the ESP32 bridge, the web app), each in its own
+terminal/session — see `systemd/*.service` for running them unattended
+instead of juggling terminal windows by hand.
 
 ## Layout
 
