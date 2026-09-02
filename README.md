@@ -30,9 +30,10 @@ script uses `rpicam-vid`'s built-in `libav` RTSP push instead — see
 `rtspclientsink` problem, needs the same rework).
 
 Running all of this requires 4 long-running processes at once (MediaMTX, the
-camera pipeline, the ESP32 bridge, the web app), each in its own
-terminal/session — see `systemd/*.service` for running them unattended
-instead of juggling terminal windows by hand.
+camera pipeline, the ESP32 bridge, the web app). **These now run as systemd
+services on the bench-test Pi** — installed, enabled, and confirmed to
+survive a full reboot with no manual terminal work. See "Installing as
+systemd services" below.
 
 ## Layout
 
@@ -66,22 +67,50 @@ systemd/      Starter unit files for running everything as services on the Pi
 3. Flash `control/esp32_firmware/esp32_firmware.ino` to the ESP32 (Arduino
    IDE or `arduino-cli`; needs the ESP32Servo, ArduinoJson, and Adafruit
    BNO055/Unified Sensor libraries — see the sketch's header comment), then
-   start the control bridge against it:
+   set up a venv and start the control bridge against it:
    ```
-   cd control && pip install -r requirements.txt
-   python esp32_bridge.py --port /dev/ttyUSB0 --baud 115200
+   cd control
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   .venv/bin/python esp32_bridge.py --port /dev/ttyUSB0 --baud 115200
    ```
-4. Start the web app:
+   (Use `--fake` instead of `--port .../--baud ...` until the ESP32 is
+   actually wired up.)
+4. Start the web app, same pattern:
    ```
-   cd web && pip install -r requirements.txt
-   uvicorn app:app --host 0.0.0.0 --port 8000
+   cd web
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   .venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000
    ```
    Open `http://<pi>:8000/` in a browser — video panel, compass dial, servo
    readout, motor bars, and sliders/buttons that actually drive the ESP32.
 
-`systemd/*.service` has starter units for running all of the above as
-services — adjust the paths inside them to match your deploy location before
-installing.
+Steps 1–4 each need their own terminal/SSH session left running — see the
+next section for running them as background services instead.
+
+## Installing as systemd services
+
+Once each piece above works manually, install them so they run in the
+background and start automatically on boot — no terminals to babysit:
+
+```
+cd ~/RC-ptz-with-hud
+sudo cp systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rc-hud-mediamtx rc-hud-pipeline rc-hud-control rc-hud-web
+sudo systemctl status rc-hud-mediamtx rc-hud-pipeline rc-hud-control rc-hud-web
+```
+
+Each should show `active (running)`. If one doesn't, check its logs with
+`sudo journalctl -u <service-name> -n 50`.
+
+The unit files as committed are hardcoded to this bench-test Pi's real setup
+(user `admincam`, repo at `/home/admincam/RC-ptz-with-hud`, MediaMTX at
+`/home/admincam/mediamtx`) — edit them if you're deploying to a different
+machine/user. `rc-hud-control.service` defaults to `--fake`; switch it to
+`--port /dev/ttyUSB0 --baud 115200` once the ESP32 is wired up, then
+`sudo systemctl daemon-reload && sudo systemctl restart rc-hud-control`.
 
 ## Developing the HUD without hardware
 
@@ -90,8 +119,10 @@ Pi-specific hardware, or ESP32 needed. Commands sent from the HUD page's
 sliders/buttons update the simulated state and are reflected straight back:
 
 ```
-cd control && python esp32_bridge.py --fake
-cd ../web && uvicorn app:app --host 0.0.0.0 --port 8000
+cd control && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python esp32_bridge.py --fake
+cd ../web && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 Then open `http://localhost:8000/`. The canvas HUD (compass dial, servo
