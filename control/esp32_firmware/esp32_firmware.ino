@@ -4,6 +4,11 @@
 // USB serial using the line-delimited JSON protocol documented in
 // control/esp32_bridge.py.
 //
+// pan/tilt/focus/zoom are plain absolute-position servos (pos: 0-180).
+// fire/load are not: they idle at 0 deg and any {"type":"servo",
+// "name":"fire"|"load"} command (pos is ignored) triggers a one-shot,
+// non-blocking swing-out-and-return — see startPulse()/updatePulse().
+//
 // NOT YET COMPILED OR RUN ON HARDWARE. Written against arduino-esp32 core
 // 3.x (for the analogWrite()-based PWM API) and assumed library choices
 // below — verify both against your actual toolchain/board before flashing.
@@ -40,6 +45,16 @@ const int MAX_MOTOR_PWM = 200;
 // Pi/USB link leaving the motors running. Does not affect servos, which
 // just hold their last commanded position.
 const unsigned long COMMAND_TIMEOUT_MS = 500;
+
+// ---- Fire/load pulse — tune these --------------------------------------
+// Fire and load aren't plain position servos: they idle at 0 deg and, on
+// any command, swing to a fixed angle, hold, then spring back to 0 —
+// entirely on the ESP32 so the sequence completes reliably even if the
+// Pi/browser link drops mid-pulse. A command while already mid-pulse is
+// ignored (button, not toggle).
+const int FIRE_PULSE_ANGLE = 40;
+const int LOAD_PULSE_ANGLE = 120;
+const unsigned long PULSE_HOLD_MS = 500;
 
 // ---- Servo pins --------------------------------------------------------
 const int PIN_SERVO_PAN = 13;
@@ -101,6 +116,28 @@ void applyMotor(const String &side, int dir, int pwm) {
 
 unsigned long lastCommandMs = 0;
 
+struct PulseState {
+  bool active = false;
+  unsigned long startMs = 0;
+};
+PulseState firePulse, loadPulse;
+
+// Starts the swing-out leg immediately; updatePulse() below brings it back
+// to 0 after PULSE_HOLD_MS without ever calling delay().
+void startPulse(PulseState &state, const String &name, int angle) {
+  if (state.active) return;  // mid-pulse: ignore, button not toggle
+  state.active = true;
+  state.startMs = millis();
+  applyServo(name, angle);
+}
+
+void updatePulse(PulseState &state, const String &name, unsigned long now) {
+  if (state.active && now - state.startMs >= PULSE_HOLD_MS) {
+    applyServo(name, 0);
+    state.active = false;
+  }
+}
+
 void handleCommandLine(const String &line) {
   JsonDocument doc;
   if (deserializeJson(doc, line) != DeserializationError::Ok) return;
@@ -111,7 +148,14 @@ void handleCommandLine(const String &line) {
 
   const char *type = doc["type"] | "";
   if (strcmp(type, "servo") == 0) {
-    applyServo(String((const char *)(doc["name"] | "")), doc["pos"] | 0);
+    String name = String((const char *)(doc["name"] | ""));
+    if (name == "fire") {
+      startPulse(firePulse, "fire", FIRE_PULSE_ANGLE);
+    } else if (name == "load") {
+      startPulse(loadPulse, "load", LOAD_PULSE_ANGLE);
+    } else {
+      applyServo(name, doc["pos"] | 0);
+    }
   } else if (strcmp(type, "motor") == 0) {
     applyMotor(String((const char *)(doc["side"] | "")), doc["dir"] | 1, doc["pwm"] | 0);
   }
@@ -178,6 +222,9 @@ void loop() {
   }
 
   unsigned long now = millis();
+
+  updatePulse(firePulse, "fire", now);
+  updatePulse(loadPulse, "load", now);
 
   if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
     // Deadman: link's gone quiet, force the drive motors off. Re-asserted

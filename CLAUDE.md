@@ -44,7 +44,7 @@ If HUD-baked-into-video is ever needed (e.g. for DVR recordings), that's an *add
   - **Low light**: if daytime-only, skip NoIR. If night operation is needed, get the NoIR variant plus an external IR illuminator (no onboard IR LEDs on the module).
 - **Motor / servo / telemetry controller**: **ESP32** dev board, connected to the Pi 5 over USB serial (115200 baud). This supersedes the previously-planned STM32H7 for the current prototyping phase — the STM32H7's independent watchdog/dual-bank-flash/brownout guarantees are a real loss for eventual field reliability, but the ESP32 (cheap, Arduino-ecosystem, built-in USB-serial) is faster to bench-test with. Revisit STM32H7 later if the reliability case matters more than iteration speed once the rig is past prototyping. See `control/esp32_firmware/esp32_firmware.ino`.
   - **Drive motors**: 2x Cytron-style 2-pin (DIR + PWM) motor controllers, one per side (left/right).
-  - **Servos** (6, hobby PWM, 0–180°): **pan**, **tilt**, **focus**, **zoom**, **fire**, **load**. ("Fire"/"load" are driven as plain servo-position commands like the others; if they turn out to need discrete/latching behavior instead of a 0–180° sweep, that's a firmware change, not a protocol change.)
+  - **Servos** (6, hobby PWM, 0–180°): **pan**, **tilt**, **focus**, **zoom**, **fire**, **load**. Pan/tilt/focus/zoom are plain absolute-position servos. Fire/load are not — see "Fire/load pulse behavior" below.
   - **Compass/IMU**: wired to the ESP32 over I2C (assumed — not yet confirmed with real wiring), folded into the same serial telemetry stream to the Pi. Firmware currently assumes a BNO055 (`Adafruit_BNO055` library) as a placeholder — swap for whatever part is actually used.
 - **GPS**: not yet chosen, and not part of the ESP32's job — needs a UART/I2C GPS module (u-blox NEO-6M/M8N are the easy default), wired directly to the Pi 5 or added to the ESP32 later. Speed can come from GPS ground speed and/or motor/wheel telemetry. Until this exists, the HUD shows a static "not wired up yet" placeholder instead of live GPS/speed.
 
@@ -80,7 +80,8 @@ Newline-delimited JSON, one object per line, in both directions over the same US
 
 **Pi → ESP32 (commands):**
 ```
-{"type": "servo", "name": "pan", "pos": 90}      // name: pan|tilt|focus|zoom|fire|load, pos: 0-180
+{"type": "servo", "name": "pan", "pos": 90}      // name: pan|tilt|focus|zoom, pos: 0-180
+{"type": "servo", "name": "fire"}                // name: fire|load — pos ignored, triggers a pulse (see below)
 {"type": "motor", "side": "l", "dir": 1, "pwm": 180}   // side: l|r, dir: 0|1, pwm: 0-255
 ```
 
@@ -94,17 +95,38 @@ This is a first draft, not yet validated against real ESP32 firmware behavior on
 
 The web page also sends a `{"type": "ping"}` heartbeat every 200ms while its control socket is open — see "Motor safety" below for why.
 
+## Fire/load pulse behavior
+
+Fire and load aren't plain position servos — they idle at **0°**, and any command triggers a one-shot, non-blocking swing-out-and-return:
+
+- **Fire**: 0° → **40°**, hold, → back to 0°
+- **Load**: 0° → **120°**, hold, → back to 0°
+- Hold duration: `PULSE_HOLD_MS` (500ms), tunable at the top of `esp32_firmware.ino`
+- A command that arrives while a pulse is already in flight is ignored (button semantics, not a toggle)
+
+This is implemented **on the ESP32 itself** (`startPulse()`/`updatePulse()` in `esp32_firmware.ino`, tracked via `millis()`, no `delay()` calls) rather than as two separately-timed commands sent from the Pi/browser — that way the sequence completes reliably even if the Pi or the browser's websocket connection hiccups mid-pulse. `control/esp32_bridge.py`'s `--fake` mode mirrors the same behavior (`FIRE_PULSE_ANGLE`/`LOAD_PULSE_ANGLE`/`PULSE_HOLD_S`) via an asyncio task, so it previews correctly without hardware. The web page's `triggerPulse()` just sends the single trigger command; the "active" highlight on the on-screen FIRE/LOAD buttons is cosmetic click-feedback only — the canvas HUD's FIRE/LOAD status pills are the real indicator, driven by live telemetry.
+
+Verified against `--fake` with a scripted websocket client: trigger → immediately reads back the pulse angle, a retrigger while mid-pulse is ignored, and it returns to 0 at ~0.5s. Not yet run against a real servo.
+
 ## Keyboard controls (web page)
 
 In addition to the on-screen sliders/buttons, `web/static/index.html` binds:
 
 - **Arrow keys** — pan (left/right) / tilt (up/down), continuous while held (`PAN_TILT_STEP_DEG` per `KEY_TICK_MS`, both tunable constants near the top of the script)
 - **I / O** — zoom in/out, same continuous-while-held behavior
-- **F / L** — fire/load, momentary: one press swings the servo to 180° and springs it back to 0° after `FIRE_LOAD_PULSE_MS`, ignoring OS key-repeat so holding the key doesn't retrigger it. The on-screen FIRE/LOAD buttons use the same `triggerPulse()` function, so mouse and keyboard behave identically.
+- **F / L** — fire/load, momentary: one press sends the trigger command (see "Fire/load pulse behavior" above — the ESP32 itself owns the actual swing-and-return timing), ignoring OS key-repeat so holding the key doesn't send it repeatedly. The on-screen FIRE/LOAD buttons use the same `triggerPulse()` function, so mouse and keyboard behave identically.
 - **W A S D** — tank-steer drive, mixed each tick from whichever keys are currently held (`left = forward + turn`, `right = forward - turn`, clamped to ±1) and scaled by the new **Speed** slider in the DRIVE panel. Releasing all drive keys sends one final stop command.
 - **Escape** — immediate stop, same as the on-screen "All stop" button. Implemented as a `driveLocked` flag rather than just clearing the held-keys set: a still-physically-held drive key keeps firing `keydown` events with `repeat: true` from the OS, and merely deleting it from the held-keys set would just let the very next repeat event silently re-add it and resume driving a moment later. `driveLocked` instead blocks drive output outright until every drive key has produced a real `keyup` (which repeat events don't). Verified with a Playwright test that dispatches synthetic `repeat: true` keydown events to confirm the stop actually holds.
 
 All of this updates the same on-screen sliders it would if you'd dragged them by hand (shared `setServo()`/`setMotor()` helpers), so the UI never gets out of sync with what's actually being sent. Losing window focus (e.g. alt-tab) clears all held keys and the drive lock, so a stuck key can't leave a motor running.
+
+## Planned enhancements (not yet built)
+
+Deliberately deferred until the ESP32 is wired up and testable against real hardware, rather than only `--fake`:
+
+- **Gamepad support** (Web Gamepad API) — WASD is on/off, so drive is always full-speed-or-nothing even with the Speed slider; an analog stick would let throttle/turn be feathered continuously.
+- **Auto-reconnect** for the video (WHEP) and control websocket — right now a dropped connection just shows "offline"/"control offline" and sits there; a few seconds of automatic retry would make the HUD meaningfully more trustworthy to actually drive with.
+- **Pan/tilt center/trim preset** — a key (e.g. `C`) that snaps pan/tilt back to 90/90 instantly, useful after a bunch of arrow-key nudging.
 
 ## Motor safety
 
@@ -136,8 +158,8 @@ None of this has been exercised against real motors — it's been verified again
 - Outdoor/weatherproofing needs for the camera housings not yet discussed.
 - Camera FOV mix (standard+wide vs. two standard) not decided, moot until camera #2 is bought.
 - **`pipeline/pip_stream.sh` (dual-camera) is known-broken** on Debian trixie for the same `rtspclientsink` reason `single_cam_stream.sh` was — needs the same kind of rework before dual-camera testing.
-- Whether "fire"/"load" should stay plain 0–180° servo commands or need different (discrete/latching) semantics — current implementation treats them the same as any other servo.
 - **`MAX_MOTOR_PWM` (200) and `COMMAND_TIMEOUT_MS` (500ms)** in "Motor safety" above are starting guesses, not validated against a real drivetrain — re-check both once real motors are wired up.
+- **Fire/load pulse angles (40°/120°) and hold time (500ms)** in "Fire/load pulse behavior" above are first guesses from the user, not yet checked against the actual mechanism they're driving (a linkage, a trigger, etc.) — confirm once wired up.
 
 ## Conventions
 

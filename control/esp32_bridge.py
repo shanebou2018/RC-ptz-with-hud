@@ -11,6 +11,7 @@ control/esp32_firmware/) and the HUD web page.
   is treated as a command and written straight through to the ESP32's
   serial port, e.g.:
       {"type": "servo", "name": "pan", "pos": 90}
+      {"type": "servo", "name": "fire"}  # pos ignored: triggers a pulse, see below
       {"type": "motor", "side": "l", "dir": 1, "pwm": 180}
       {"type": "ping"}
   See control/esp32_firmware/esp32_firmware.ino for the exact fields each
@@ -18,6 +19,13 @@ control/esp32_firmware/) and the HUD web page.
   hundred ms whenever the socket is open — it keeps the ESP32's deadman
   timeout from tripping even while a motor is deliberately held at a
   non-zero speed and no slider is actively moving.
+
+  fire/load aren't plain position servos: they idle at 0 and any command
+  triggers a one-shot swing-out-and-return (FIRE_PULSE_ANGLE/
+  LOAD_PULSE_ANGLE, held for PULSE_HOLD_S) — a command mid-pulse is
+  ignored. This mirrors the real ESP32 firmware, which runs the same
+  sequence itself (non-blocking, via millis()) rather than relying on the
+  Pi to time two separate commands.
 
 This makes the websocket a single shared channel: browser -> command ->
 ESP32, and ESP32 -> telemetry -> browser (fanned out to all clients). If
@@ -50,6 +58,14 @@ import websockets
 # =============================================================================
 MAX_MOTOR_PWM = 200
 COMMAND_TIMEOUT_S = 0.5  # matches esp32_firmware.ino's COMMAND_TIMEOUT_MS
+
+# Fire/load aren't plain position servos: they idle at 0 and any command
+# triggers a one-shot swing-out-and-return. Mirrors esp32_firmware.ino's
+# FIRE_PULSE_ANGLE/LOAD_PULSE_ANGLE/PULSE_HOLD_MS so --fake previews the
+# same behavior as real hardware.
+FIRE_PULSE_ANGLE = 40
+LOAD_PULSE_ANGLE = 120
+PULSE_HOLD_S = 0.5
 
 clients: set = set()
 
@@ -107,6 +123,7 @@ class FakeEsp32:
             "motor": {"l": {"dir": 1, "pwm": 0}, "r": {"dir": 1, "pwm": 0}},
         }
         self.last_command_ts = time.monotonic()
+        self._pulse_tasks: dict = {}
 
     def send_command(self, line: str) -> None:
         try:
@@ -116,7 +133,9 @@ class FakeEsp32:
         # Any well-formed command — including a plain {"type":"ping"}
         # heartbeat — counts as proof the link is alive.
         self.last_command_ts = time.monotonic()
-        if cmd.get("type") == "servo" and cmd.get("name") in self.state["servo"]:
+        if cmd.get("type") == "servo" and cmd.get("name") in ("fire", "load"):
+            self._start_pulse(cmd["name"])
+        elif cmd.get("type") == "servo" and cmd.get("name") in self.state["servo"]:
             self.state["servo"][cmd["name"]] = cmd.get("pos", 0)
         elif cmd.get("type") == "motor" and cmd.get("side") in self.state["motor"]:
             pwm = max(0, min(cmd.get("pwm", 0), MAX_MOTOR_PWM))
@@ -124,6 +143,19 @@ class FakeEsp32:
         else:
             return  # unrecognized/ping-only line, nothing changed to broadcast
         asyncio.create_task(broadcast(json.dumps(self.state)))
+
+    def _start_pulse(self, name: str) -> None:
+        task = self._pulse_tasks.get(name)
+        if task is not None and not task.done():
+            return  # mid-pulse: ignore, button not toggle
+        angle = FIRE_PULSE_ANGLE if name == "fire" else LOAD_PULSE_ANGLE
+        self.state["servo"][name] = angle
+        self._pulse_tasks[name] = asyncio.create_task(self._finish_pulse(name))
+
+    async def _finish_pulse(self, name: str) -> None:
+        await asyncio.sleep(PULSE_HOLD_S)
+        self.state["servo"][name] = 0
+        await broadcast(json.dumps(self.state))
 
     async def spin_loop(self) -> None:
         while True:

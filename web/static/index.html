@@ -134,7 +134,10 @@
     const PAN_TILT_STEP_DEG = 2;   // per tick, while an arrow key is held
     const ZOOM_STEP_DEG = 2;       // per tick, while I/O is held
     const KEY_TICK_MS = 50;        // how often held keys are re-applied
-    const FIRE_LOAD_PULSE_MS = 300; // how long the fire/load servo holds before resetting
+    // Cosmetic only (matches the ESP32's PULSE_HOLD_MS, but isn't what
+    // actually times the servo — see triggerPulse() below): how long the
+    // FIRE/LOAD button shows its "active" click-feedback state.
+    const FIRE_LOAD_PULSE_MS = 500;
 
     const statusEl = document.getElementById("status");
     const statusTextEl = document.getElementById("statusText");
@@ -406,16 +409,17 @@
       sendCommand({ type: "motor", side, dir: value >= 0 ? 1 : 0, pwm: Math.abs(value) });
     }
 
-    // Momentary trigger, not a toggle: press once, the servo swings to
-    // 180 and springs back to 0 after FIRE_LOAD_PULSE_MS — used by both
-    // the on-screen FIRE/LOAD buttons and the F/L keys.
+    // Momentary trigger, not a toggle: the ESP32 firmware owns the actual
+    // swing-out-and-return sequence (non-blocking, via millis() — see
+    // esp32_firmware.ino) so it completes reliably even if this page's
+    // connection hiccups mid-pulse. "pos" is ignored for fire/load; any
+    // command just triggers it. The button's "active" class here is purely
+    // a click-feedback cue — the canvas HUD's FIRE/LOAD pills are the real
+    // status indicator, driven by live telemetry.
     function triggerPulse(servoName, btnEl) {
-      setServo(servoName, 180);
+      sendCommand({ type: "servo", name: servoName, pos: 1 });
       btnEl?.classList.add("active");
-      setTimeout(() => {
-        setServo(servoName, 0);
-        btnEl?.classList.remove("active");
-      }, FIRE_LOAD_PULSE_MS);
+      setTimeout(() => btnEl?.classList.remove("active"), FIRE_LOAD_PULSE_MS);
     }
 
     function wireControls() {
