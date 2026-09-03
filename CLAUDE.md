@@ -94,6 +94,17 @@ This is a first draft, not yet validated against real ESP32 firmware behavior on
 
 The web page also sends a `{"type": "ping"}` heartbeat every 200ms while its control socket is open — see "Motor safety" below for why.
 
+## Keyboard controls (web page)
+
+In addition to the on-screen sliders/buttons, `web/static/index.html` binds:
+
+- **Arrow keys** — pan (left/right) / tilt (up/down), continuous while held (`PAN_TILT_STEP_DEG` per `KEY_TICK_MS`, both tunable constants near the top of the script)
+- **I / O** — zoom in/out, same continuous-while-held behavior
+- **F / L** — fire/load, momentary: one press swings the servo to 180° and springs it back to 0° after `FIRE_LOAD_PULSE_MS`, ignoring OS key-repeat so holding the key doesn't retrigger it. The on-screen FIRE/LOAD buttons use the same `triggerPulse()` function, so mouse and keyboard behave identically.
+- **W A S D** — tank-steer drive, mixed each tick from whichever keys are currently held (`left = forward + turn`, `right = forward - turn`, clamped to ±1) and scaled by the new **Speed** slider in the DRIVE panel. Releasing all drive keys sends one final stop command.
+
+All of this updates the same on-screen sliders it would if you'd dragged them by hand (shared `setServo()`/`setMotor()` helpers), so the UI never gets out of sync with what's actually being sent. Losing window focus (e.g. alt-tab) clears all held keys, so a stuck key can't leave a motor running.
+
 ## Motor safety
 
 Two independent safeguards on the drive motors, each with its own tunable constant kept at the top of its file (and kept in sync across all three, called out in each one's comment):

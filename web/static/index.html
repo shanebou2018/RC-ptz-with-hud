@@ -73,6 +73,11 @@
     .chip.active { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
     .chip.stop { border-color: rgba(255,77,79,0.4); color: var(--danger); }
     .chip.stop:hover { background: var(--danger-soft); border-color: var(--danger); }
+
+    #keyHint {
+      width: 1280px; margin: -20px auto 40px; text-align: center;
+      font-size: 11px; letter-spacing: 0.02em; color: var(--text-muted);
+    }
   </style>
 </head>
 <body>
@@ -97,6 +102,7 @@
 
     <div class="panel">
       <h2>Drive</h2>
+      <div class="slider-row"><label>Speed</label><input type="range" value="150" id="speedSlider"><output id="speedOutput">150</output></div>
       <div class="slider-row"><label>Left</label><input type="range" value="0" data-motor="l"><output>0</output></div>
       <div class="slider-row"><label>Right</label><input type="range" value="0" data-motor="r"><output>0</output></div>
       <div class="chip-row">
@@ -104,6 +110,8 @@
       </div>
     </div>
   </div>
+
+  <div id="keyHint">&larr;&rarr; pan &middot; &uarr;&darr; tilt &middot; I / O zoom &middot; F fire &middot; L load &middot; W A S D drive (speed set above)</div>
 
   <script>
     // MediaMTX serves its own WHEP endpoint; the browser talks to it
@@ -121,6 +129,12 @@
     // will cut the motors while you're still actively driving. ------------
     const MAX_MOTOR_PWM = 200;
     const HEARTBEAT_INTERVAL_MS = 200;
+
+    // ---- Keyboard control tuning --------------------------------------
+    const PAN_TILT_STEP_DEG = 2;   // per tick, while an arrow key is held
+    const ZOOM_STEP_DEG = 2;       // per tick, while I/O is held
+    const KEY_TICK_MS = 50;        // how often held keys are re-applied
+    const FIRE_LOAD_PULSE_MS = 300; // how long the fire/load servo holds before resetting
 
     const statusEl = document.getElementById("status");
     const statusTextEl = document.getElementById("statusText");
@@ -365,6 +379,45 @@
       }
     }
 
+    // ---- Shared setters: used by both mouse-driven sliders and the
+    // keyboard tick loop below, so the on-screen sliders always reflect
+    // whatever actually got sent, regardless of input source. ------------
+
+    function servoSliderEl(name) { return document.querySelector(`input[data-servo="${name}"]`); }
+    function motorSliderEl(side) { return document.querySelector(`input[data-motor="${side}"]`); }
+
+    function setServo(name, pos) {
+      pos = Math.max(0, Math.min(180, Math.round(pos)));
+      const input = servoSliderEl(name);
+      if (input) {
+        input.value = pos;
+        input.nextElementSibling.textContent = pos;
+      }
+      sendCommand({ type: "servo", name, pos });
+    }
+
+    function setMotor(side, value) {
+      value = Math.max(-MAX_MOTOR_PWM, Math.min(MAX_MOTOR_PWM, Math.round(value)));
+      const input = motorSliderEl(side);
+      if (input) {
+        input.value = value;
+        input.nextElementSibling.textContent = value;
+      }
+      sendCommand({ type: "motor", side, dir: value >= 0 ? 1 : 0, pwm: Math.abs(value) });
+    }
+
+    // Momentary trigger, not a toggle: press once, the servo swings to
+    // 180 and springs back to 0 after FIRE_LOAD_PULSE_MS — used by both
+    // the on-screen FIRE/LOAD buttons and the F/L keys.
+    function triggerPulse(servoName, btnEl) {
+      setServo(servoName, 180);
+      btnEl?.classList.add("active");
+      setTimeout(() => {
+        setServo(servoName, 0);
+        btnEl?.classList.remove("active");
+      }, FIRE_LOAD_PULSE_MS);
+    }
+
     function wireControls() {
       document.querySelectorAll("input[data-servo]").forEach((input) => {
         const output = input.nextElementSibling;
@@ -375,10 +428,7 @@
       });
 
       document.querySelectorAll("[data-servo-toggle]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const on = btn.classList.toggle("active");
-          sendCommand({ type: "servo", name: btn.dataset.servoToggle, pos: on ? 180 : 0 });
-        });
+        btn.addEventListener("click", () => triggerPulse(btn.dataset.servoToggle, btn));
       });
 
       document.querySelectorAll("input[data-motor]").forEach((input) => {
@@ -397,20 +447,92 @@
         });
       });
 
-      document.getElementById("stopBtn").addEventListener("click", () => {
-        document.querySelectorAll("input[data-motor]").forEach((input) => {
-          input.value = 0;
-          input.nextElementSibling.textContent = "0";
-        });
-        sendCommand({ type: "motor", side: "l", dir: 1, pwm: 0 });
-        sendCommand({ type: "motor", side: "r", dir: 1, pwm: 0 });
+      const speedSlider = document.getElementById("speedSlider");
+      speedSlider.min = 0;
+      speedSlider.max = MAX_MOTOR_PWM;
+      speedSlider.addEventListener("input", () => {
+        driveSpeed = Number(speedSlider.value);
+        document.getElementById("speedOutput").textContent = driveSpeed;
       });
+
+      document.getElementById("stopBtn").addEventListener("click", () => {
+        setMotor("l", 0);
+        setMotor("r", 0);
+      });
+    }
+
+    // ---- Keyboard control ---------------------------------------------
+    // Arrow keys: pan/tilt (held = continuous). I/O: zoom (held =
+    // continuous). F/L: momentary fire/load pulse, not latching — a
+    // second press while the pulse is mid-flight does nothing (ignores
+    // key-repeat) until it's released. W A S D: tank-steer drive, mixed
+    // from whichever of the four are currently held, scaled by the Speed
+    // slider.
+
+    let driveSpeed = 150;
+    const heldKeys = new Set();
+    const CONTINUOUS_KEYS = new Set([
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+      "KeyI", "KeyO", "KeyW", "KeyA", "KeyS", "KeyD",
+    ]);
+
+    window.addEventListener("keydown", (event) => {
+      if (CONTINUOUS_KEYS.has(event.code)) {
+        event.preventDefault();
+        heldKeys.add(event.code);
+      } else if (event.code === "KeyF" && !event.repeat) {
+        event.preventDefault();
+        triggerPulse("fire", document.getElementById("fireBtn"));
+      } else if (event.code === "KeyL" && !event.repeat) {
+        event.preventDefault();
+        triggerPulse("load", document.getElementById("loadBtn"));
+      }
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (CONTINUOUS_KEYS.has(event.code)) {
+        event.preventDefault();
+        heldKeys.delete(event.code);
+      }
+    });
+
+    // Loses key state if focus leaves the page (e.g. alt-tab) while a
+    // key is physically still down — otherwise it'd keep "driving".
+    window.addEventListener("blur", () => heldKeys.clear());
+
+    let driveWasActive = false;
+
+    function keyboardTick() {
+      if (heldKeys.has("ArrowLeft") || heldKeys.has("ArrowRight")) {
+        const delta = (heldKeys.has("ArrowRight") ? 1 : 0) - (heldKeys.has("ArrowLeft") ? 1 : 0);
+        setServo("pan", Number(servoSliderEl("pan").value) + delta * PAN_TILT_STEP_DEG);
+      }
+      if (heldKeys.has("ArrowUp") || heldKeys.has("ArrowDown")) {
+        const delta = (heldKeys.has("ArrowUp") ? 1 : 0) - (heldKeys.has("ArrowDown") ? 1 : 0);
+        setServo("tilt", Number(servoSliderEl("tilt").value) + delta * PAN_TILT_STEP_DEG);
+      }
+      if (heldKeys.has("KeyI") || heldKeys.has("KeyO")) {
+        const delta = (heldKeys.has("KeyI") ? 1 : 0) - (heldKeys.has("KeyO") ? 1 : 0);
+        setServo("zoom", Number(servoSliderEl("zoom").value) + delta * ZOOM_STEP_DEG);
+      }
+
+      const forward = (heldKeys.has("KeyW") ? 1 : 0) - (heldKeys.has("KeyS") ? 1 : 0);
+      const turn = (heldKeys.has("KeyD") ? 1 : 0) - (heldKeys.has("KeyA") ? 1 : 0);
+      const driveActive = forward !== 0 || turn !== 0;
+      if (driveActive || driveWasActive) {
+        const left = Math.max(-1, Math.min(1, forward + turn));
+        const right = Math.max(-1, Math.min(1, forward - turn));
+        setMotor("l", left * driveSpeed);
+        setMotor("r", right * driveSpeed);
+      }
+      driveWasActive = driveActive;
     }
 
     startVideo();
     startControlSocket();
     wireControls();
     requestAnimationFrame(render);
+    setInterval(keyboardTick, KEY_TICK_MS);
 
     // Keeps the ESP32's deadman timeout from tripping while a motor is
     // deliberately held at a non-zero speed and no slider is moving.
