@@ -111,7 +111,7 @@
     </div>
   </div>
 
-  <div id="keyHint">&larr;&rarr; pan &middot; &uarr;&darr; tilt &middot; I / O zoom &middot; F fire &middot; L load &middot; W A S D drive (speed set above)</div>
+  <div id="keyHint">&larr;&rarr; pan &middot; &uarr;&darr; tilt &middot; I / O zoom &middot; F fire &middot; L load &middot; W A S D drive (speed set above) &middot; Esc stop</div>
 
   <script>
     // MediaMTX serves its own WHEP endpoint; the browser talks to it
@@ -455,10 +455,22 @@
         document.getElementById("speedOutput").textContent = driveSpeed;
       });
 
-      document.getElementById("stopBtn").addEventListener("click", () => {
-        setMotor("l", 0);
-        setMotor("r", 0);
-      });
+      document.getElementById("stopBtn").addEventListener("click", stopDrive);
+    }
+
+    // While a key is physically held, the browser keeps firing keydown
+    // with repeat=true — so merely deleting WASD from heldKeys here isn't
+    // enough, the very next repeat event would just re-add it and the
+    // drive would silently resume. driveLocked instead blocks drive
+    // output outright until every drive key has been actually released
+    // (a real keyup, which repeat events don't produce).
+    let driveLocked = false;
+    const DRIVE_KEYS = ["KeyW", "KeyA", "KeyS", "KeyD"];
+
+    function stopDrive() {
+      driveLocked = true;
+      setMotor("l", 0);
+      setMotor("r", 0);
     }
 
     // ---- Keyboard control ---------------------------------------------
@@ -467,7 +479,10 @@
     // second press while the pulse is mid-flight does nothing (ignores
     // key-repeat) until it's released. W A S D: tank-steer drive, mixed
     // from whichever of the four are currently held, scaled by the Speed
-    // slider.
+    // slider. Escape: immediate stop (same as the All stop button) —
+    // safe to preventDefault outside of fullscreen; browsers force
+    // Escape to exit fullscreen regardless, if this page is ever shown
+    // that way.
 
     let driveSpeed = 150;
     const heldKeys = new Set();
@@ -486,6 +501,9 @@
       } else if (event.code === "KeyL" && !event.repeat) {
         event.preventDefault();
         triggerPulse("load", document.getElementById("loadBtn"));
+      } else if (event.code === "Escape" && !event.repeat) {
+        event.preventDefault();
+        stopDrive();
       }
     });
 
@@ -493,12 +511,15 @@
       if (CONTINUOUS_KEYS.has(event.code)) {
         event.preventDefault();
         heldKeys.delete(event.code);
+        if (driveLocked && !DRIVE_KEYS.some((k) => heldKeys.has(k))) {
+          driveLocked = false;
+        }
       }
     });
 
     // Loses key state if focus leaves the page (e.g. alt-tab) while a
     // key is physically still down — otherwise it'd keep "driving".
-    window.addEventListener("blur", () => heldKeys.clear());
+    window.addEventListener("blur", () => { heldKeys.clear(); driveLocked = false; });
 
     let driveWasActive = false;
 
@@ -516,8 +537,8 @@
         setServo("zoom", Number(servoSliderEl("zoom").value) + delta * ZOOM_STEP_DEG);
       }
 
-      const forward = (heldKeys.has("KeyW") ? 1 : 0) - (heldKeys.has("KeyS") ? 1 : 0);
-      const turn = (heldKeys.has("KeyD") ? 1 : 0) - (heldKeys.has("KeyA") ? 1 : 0);
+      const forward = driveLocked ? 0 : (heldKeys.has("KeyW") ? 1 : 0) - (heldKeys.has("KeyS") ? 1 : 0);
+      const turn = driveLocked ? 0 : (heldKeys.has("KeyD") ? 1 : 0) - (heldKeys.has("KeyA") ? 1 : 0);
       const driveActive = forward !== 0 || turn !== 0;
       if (driveActive || driveWasActive) {
         const left = Math.max(-1, Math.min(1, forward + turn));

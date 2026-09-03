@@ -102,8 +102,9 @@ In addition to the on-screen sliders/buttons, `web/static/index.html` binds:
 - **I / O** — zoom in/out, same continuous-while-held behavior
 - **F / L** — fire/load, momentary: one press swings the servo to 180° and springs it back to 0° after `FIRE_LOAD_PULSE_MS`, ignoring OS key-repeat so holding the key doesn't retrigger it. The on-screen FIRE/LOAD buttons use the same `triggerPulse()` function, so mouse and keyboard behave identically.
 - **W A S D** — tank-steer drive, mixed each tick from whichever keys are currently held (`left = forward + turn`, `right = forward - turn`, clamped to ±1) and scaled by the new **Speed** slider in the DRIVE panel. Releasing all drive keys sends one final stop command.
+- **Escape** — immediate stop, same as the on-screen "All stop" button. Implemented as a `driveLocked` flag rather than just clearing the held-keys set: a still-physically-held drive key keeps firing `keydown` events with `repeat: true` from the OS, and merely deleting it from the held-keys set would just let the very next repeat event silently re-add it and resume driving a moment later. `driveLocked` instead blocks drive output outright until every drive key has produced a real `keyup` (which repeat events don't). Verified with a Playwright test that dispatches synthetic `repeat: true` keydown events to confirm the stop actually holds.
 
-All of this updates the same on-screen sliders it would if you'd dragged them by hand (shared `setServo()`/`setMotor()` helpers), so the UI never gets out of sync with what's actually being sent. Losing window focus (e.g. alt-tab) clears all held keys, so a stuck key can't leave a motor running.
+All of this updates the same on-screen sliders it would if you'd dragged them by hand (shared `setServo()`/`setMotor()` helpers), so the UI never gets out of sync with what's actually being sent. Losing window focus (e.g. alt-tab) clears all held keys and the drive lock, so a stuck key can't leave a motor running.
 
 ## Motor safety
 
