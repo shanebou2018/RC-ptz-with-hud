@@ -4,63 +4,105 @@
   <meta charset="utf-8" />
   <title>RC PTZ HUD</title>
   <style>
-    html, body { margin: 0; background: #000; color: #0f0; font: 13px monospace; }
-    .stage { position: relative; width: 1280px; height: 720px; margin: 0 auto; }
+    :root {
+      --bg: #05070a;
+      --panel-bg: rgba(13, 18, 26, 0.75);
+      --panel-border: rgba(255, 255, 255, 0.10);
+      --accent: #00d4ff;
+      --danger: #ff4d4f;
+      --danger-soft: rgba(255, 77, 79, 0.15);
+      --text: #eaf6ff;
+      --text-muted: rgba(234, 246, 255, 0.55);
+      --mono: "SFMono-Regular", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+
+    .stage {
+      position: relative; width: 1280px; height: 720px; margin: 0 auto;
+      border-radius: 16px; overflow: hidden; background: #000;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 24px 60px rgba(0,0,0,0.6);
+    }
     video, canvas.hud { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
     canvas.hud { pointer-events: none; }
-    #status { position: absolute; top: 8px; right: 12px; }
 
-    #controls {
-      width: 1280px;
-      margin: 12px auto;
-      display: flex;
-      gap: 32px;
-      align-items: flex-start;
+    #status {
+      position: absolute; top: 16px; right: 16px;
+      display: flex; align-items: center; gap: 7px;
+      background: rgba(8,14,20,0.6); border: 1px solid var(--panel-border);
+      border-radius: 999px; padding: 6px 12px 6px 10px;
+      font: 700 10px var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--text-muted);
     }
-    #controls fieldset { border: 1px solid #0a0; color: #0f0; }
-    #controls legend { padding: 0 4px; }
-    .servo-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-    .servo-row label { width: 50px; display: inline-block; }
-    .servo-row output { width: 32px; display: inline-block; text-align: right; }
-    .btn-row { display: flex; gap: 8px; margin-top: 8px; }
-    button {
-      background: #010; color: #0f0; border: 1px solid #0f0;
-      font: 13px monospace; padding: 4px 10px; cursor: pointer;
+    #status .dot { width: 7px; height: 7px; border-radius: 50%; background: #666; flex: none; }
+    #status.live { color: var(--text); }
+    #status.live .dot { background: #2ee6a6; box-shadow: 0 0 6px #2ee6a6; }
+    #status.error .dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+    #controls { width: 1280px; margin: 20px auto 40px; display: flex; gap: 20px; }
+    .panel {
+      flex: 1; background: var(--panel-bg); border: 1px solid var(--panel-border);
+      border-radius: 14px; padding: 18px 22px;
     }
-    button.active { background: #0f0; color: #010; }
-    .motor-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-    .motor-row label { width: 50px; }
-    .motor-row input[type=range] { width: 160px; }
+    .panel h2 {
+      margin: 0 0 16px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--text-muted); font-weight: 700;
+    }
+    .slider-row { display: flex; align-items: center; gap: 14px; margin: 12px 0; }
+    .slider-row label {
+      width: 56px; font-size: 12px; color: var(--text-muted); font-weight: 700; letter-spacing: 0.03em;
+    }
+    .slider-row output { width: 40px; text-align: right; font: 700 13px var(--mono); color: var(--text); }
+    input[type=range] {
+      flex: 1; -webkit-appearance: none; height: 4px; border-radius: 2px;
+      background: rgba(255,255,255,0.12); outline: none;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+      background: var(--accent); cursor: pointer; box-shadow: 0 0 8px rgba(0,212,255,0.6);
+      border: 2px solid var(--bg);
+    }
+    .chip-row { display: flex; gap: 10px; margin-top: 16px; }
+    .chip {
+      flex: 1; padding: 9px 0; text-align: center; border-radius: 8px;
+      border: 1px solid var(--panel-border); background: rgba(255,255,255,0.04);
+      color: var(--text-muted); font: 700 11px var(--sans); letter-spacing: 0.05em;
+      text-transform: uppercase; cursor: pointer; transition: all .15s ease;
+    }
+    .chip:hover { border-color: rgba(255,255,255,0.25); color: var(--text); }
+    .chip.active { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+    .chip.stop { border-color: rgba(255,77,79,0.4); color: var(--danger); }
+    .chip.stop:hover { background: var(--danger-soft); border-color: var(--danger); }
   </style>
 </head>
 <body>
   <div class="stage">
     <video id="video" autoplay muted playsinline></video>
     <canvas id="hud" class="hud" width="1280" height="720"></canvas>
-    <div id="status">connecting…</div>
+    <div id="status"><span class="dot"></span><span id="statusText">connecting</span></div>
   </div>
 
   <div id="controls">
-    <fieldset>
-      <legend>SERVOS</legend>
-      <div class="servo-row"><label>PAN</label><input type="range" min="0" max="180" value="90" data-servo="pan"><output>90</output></div>
-      <div class="servo-row"><label>TILT</label><input type="range" min="0" max="180" value="90" data-servo="tilt"><output>90</output></div>
-      <div class="servo-row"><label>FOCUS</label><input type="range" min="0" max="180" value="0" data-servo="focus"><output>0</output></div>
-      <div class="servo-row"><label>ZOOM</label><input type="range" min="0" max="180" value="0" data-servo="zoom"><output>0</output></div>
-      <div class="btn-row">
-        <button id="fireBtn" data-servo-toggle="fire">FIRE</button>
-        <button id="loadBtn" data-servo-toggle="load">LOAD</button>
+    <div class="panel">
+      <h2>Servos</h2>
+      <div class="slider-row"><label>Pan</label><input type="range" min="0" max="180" value="90" data-servo="pan"><output>90</output></div>
+      <div class="slider-row"><label>Tilt</label><input type="range" min="0" max="180" value="90" data-servo="tilt"><output>90</output></div>
+      <div class="slider-row"><label>Focus</label><input type="range" min="0" max="180" value="0" data-servo="focus"><output>0</output></div>
+      <div class="slider-row"><label>Zoom</label><input type="range" min="0" max="180" value="0" data-servo="zoom"><output>0</output></div>
+      <div class="chip-row">
+        <div class="chip" id="fireBtn" data-servo-toggle="fire">Fire</div>
+        <div class="chip" id="loadBtn" data-servo-toggle="load">Load</div>
       </div>
-    </fieldset>
+    </div>
 
-    <fieldset>
-      <legend>DRIVE</legend>
-      <div class="motor-row"><label>LEFT</label><input type="range" value="0" data-motor="l"><output>0</output></div>
-      <div class="motor-row"><label>RIGHT</label><input type="range" value="0" data-motor="r"><output>0</output></div>
-      <div class="btn-row">
-        <button id="stopBtn">ALL STOP</button>
+    <div class="panel">
+      <h2>Drive</h2>
+      <div class="slider-row"><label>Left</label><input type="range" value="0" data-motor="l"><output>0</output></div>
+      <div class="slider-row"><label>Right</label><input type="range" value="0" data-motor="r"><output>0</output></div>
+      <div class="chip-row">
+        <div class="chip stop" id="stopBtn">All stop</div>
       </div>
-    </fieldset>
+    </div>
   </div>
 
   <script>
@@ -81,6 +123,12 @@
     const HEARTBEAT_INTERVAL_MS = 200;
 
     const statusEl = document.getElementById("status");
+    const statusTextEl = document.getElementById("statusText");
+
+    function setStatus(text, state) {
+      statusTextEl.textContent = text;
+      statusEl.className = state || "";
+    }
 
     async function startVideo() {
       const pc = new RTCPeerConnection();
@@ -90,7 +138,7 @@
       };
       pc.onconnectionstatechange = () => {
         if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
-          statusEl.textContent = "video: " + pc.connectionState;
+          setStatus("video " + pc.connectionState, "error");
         }
       };
 
@@ -104,75 +152,180 @@
         body: offer.sdp,
       });
       if (!res.ok) {
-        statusEl.textContent = `WHEP error ${res.status}`;
+        setStatus(`WHEP error ${res.status}`, "error");
         return;
       }
       const answerSdp = await res.text();
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
     }
 
-    // ---- Compass dial + servo/motor readout on the canvas -----------------
+    // ---- HUD drawing helpers -----------------------------------------------
 
-    function drawCompass(ctx, cx, cy, r, hdg) {
-      ctx.strokeStyle = "#0f0";
-      ctx.fillStyle = "#0f0";
-      ctx.lineWidth = 2;
+    function glassPanel(ctx, x, y, w, h, r) {
       ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.roundRect(x, y, w, h, r);
+      ctx.fillStyle = "rgba(8,14,20,0.55)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.14)";
+      ctx.lineWidth = 1;
       ctx.stroke();
+    }
 
-      ctx.font = "13px monospace";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const ticks = [
-        ["N", 0], ["30", 30], ["60", 60], ["E", 90], ["120", 120], ["150", 150],
-        ["S", 180], ["210", 210], ["240", 240], ["W", 270], ["300", 300], ["330", 330],
-      ];
-      for (const [label, deg] of ticks) {
-        const rel = (deg - hdg) * Math.PI / 180;
-        const x = cx + Math.sin(rel) * (r - 14);
-        const y = cy - Math.cos(rel) * (r - 14);
-        ctx.fillText(label, x, y);
-      }
+    function drawHeadingTape(ctx, cx, y, width, hdg) {
+      const height = 46;
+      const left = cx - width / 2;
+      glassPanel(ctx, left, y - height / 2, width, height, 10);
 
-      // fixed needle: always points up, marks current heading
+      ctx.save();
       ctx.beginPath();
-      ctx.moveTo(cx, cy - r + 4);
-      ctx.lineTo(cx - 6, cy - r + 18);
-      ctx.lineTo(cx + 6, cy - r + 18);
+      ctx.rect(left + 10, y - height / 2, width - 20, height);
+      ctx.clip();
+
+      const pxPerDeg = (width - 20) / 100;
+      const dirNames = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+      for (let deg = 0; deg < 360; deg += 15) {
+        const delta = ((deg - hdg + 540) % 360) - 180;
+        if (Math.abs(delta) > 55) continue;
+        const x = cx + delta * pxPerDeg;
+        const major = deg % 45 === 0;
+        ctx.strokeStyle = major ? "rgba(234,246,255,0.75)" : "rgba(234,246,255,0.3)";
+        ctx.lineWidth = major ? 2 : 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y + height / 2 - (major ? 16 : 9));
+        ctx.lineTo(x, y + height / 2 - 3);
+        ctx.stroke();
+        if (major) {
+          ctx.fillStyle = "rgba(234,246,255,0.85)";
+          ctx.font = "700 11px -apple-system, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(dirNames[deg / 45], x, y - height / 2 + 13);
+        }
+      }
+      ctx.restore();
+
+      ctx.fillStyle = "#00d4ff";
+      ctx.beginPath();
+      ctx.moveTo(cx, y + height / 2 + 2);
+      ctx.lineTo(cx - 6, y + height / 2 + 12);
+      ctx.lineTo(cx + 6, y + height / 2 + 12);
       ctx.closePath();
       ctx.fill();
 
-      ctx.font = "16px monospace";
-      ctx.fillText(`${hdg.toFixed(0)}°`, cx, cy);
-    }
-
-    function drawMotorBar(ctx, x, y, w, h, label, dir, pwm) {
-      ctx.strokeStyle = "#0f0";
-      ctx.strokeRect(x, y, w, h);
-      const frac = Math.max(0, Math.min(1, pwm / MAX_MOTOR_PWM));
-      const barH = h * frac;
-      ctx.fillStyle = dir ? "#0f0" : "#0a0";
-      ctx.fillRect(x, y + h - barH, w, barH);
-      ctx.fillStyle = "#0f0";
-      ctx.font = "12px monospace";
+      ctx.font = "700 20px SFMono-Regular, Menlo, Consolas, monospace";
+      ctx.fillStyle = "#eaf6ff";
       ctx.textAlign = "center";
-      ctx.fillText(label, x + w / 2, y + h + 14);
-      ctx.fillText(dir ? "FWD" : "REV", x + w / 2, y - 8);
+      ctx.textBaseline = "middle";
+      ctx.fillText(`${Math.round(hdg)}°`, cx, y);
     }
 
-    function drawServoReadout(ctx, x, y, servo) {
+    function statusPill(ctx, x, y, label, active) {
+      const w = 74, h = 24;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, h / 2);
+      ctx.fillStyle = active ? "rgba(255,77,79,0.18)" : "rgba(255,255,255,0.06)";
+      ctx.fill();
+      ctx.strokeStyle = active ? "#ff4d4f" : "rgba(255,255,255,0.2)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = active ? "#ff4d4f" : "rgba(234,246,255,0.5)";
+      ctx.font = "700 10px -apple-system, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+    }
+
+    function drawServoPanel(ctx, x, y, servo) {
+      const w = 200, h = 178;
+      glassPanel(ctx, x, y, w, h, 12);
+
       ctx.textAlign = "left";
-      ctx.font = "16px monospace";
-      const lines = [
-        `PAN   ${servo.pan}°`,
-        `TILT  ${servo.tilt}°`,
-        `FOCUS ${servo.focus}°`,
-        `ZOOM  ${servo.zoom}°`,
-        `FIRE  ${servo.fire ? "ARMED" : "safe"}`,
-        `LOAD  ${servo.load ? "LOADED" : "empty"}`,
+      ctx.textBaseline = "alphabetic";
+      ctx.font = "700 10px -apple-system, sans-serif";
+      ctx.fillStyle = "rgba(234,246,255,0.5)";
+      ctx.fillText("SERVOS", x + 18, y + 24);
+
+      const rows = [
+        ["Pan", `${servo.pan ?? 0}°`],
+        ["Tilt", `${servo.tilt ?? 0}°`],
+        ["Focus", `${servo.focus ?? 0}°`],
+        ["Zoom", `${servo.zoom ?? 0}°`],
       ];
-      lines.forEach((line, i) => ctx.fillText(line, x, y + i * 22));
+      rows.forEach(([label, val], i) => {
+        const ry = y + 48 + i * 24;
+        ctx.font = "600 13px -apple-system, sans-serif";
+        ctx.fillStyle = "rgba(234,246,255,0.55)";
+        ctx.textAlign = "left";
+        ctx.fillText(label, x + 18, ry);
+        ctx.font = "700 14px SFMono-Regular, Menlo, Consolas, monospace";
+        ctx.fillStyle = "#eaf6ff";
+        ctx.textAlign = "right";
+        ctx.fillText(val, x + w - 18, ry);
+      });
+
+      statusPill(ctx, x + 18, y + h - 34, "FIRE", !!servo.fire);
+      statusPill(ctx, x + 18 + 74 + 8, y + h - 34, "LOAD", !!servo.load);
+    }
+
+    function drawMotorRow(ctx, x, y, w, label, motor) {
+      const dir = motor?.dir ?? 1;
+      const pwm = motor?.pwm ?? 0;
+      const frac = Math.max(0, Math.min(1, pwm / MAX_MOTOR_PWM));
+
+      ctx.font = "700 12px -apple-system, sans-serif";
+      ctx.fillStyle = "rgba(234,246,255,0.85)";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, x, y);
+
+      const barX = x + 18, barW = w - 60, barH = 6;
+      ctx.beginPath();
+      ctx.roundRect(barX, y - barH / 2, barW, barH, barH / 2);
+      ctx.fillStyle = "rgba(255,255,255,0.1)";
+      ctx.fill();
+
+      if (pwm > 0) {
+        ctx.beginPath();
+        ctx.roundRect(barX, y - barH / 2, Math.max(barH, barW * frac), barH, barH / 2);
+        ctx.fillStyle = dir ? "#00d4ff" : "#ff4d4f";
+        ctx.fill();
+      }
+
+      ctx.font = "600 12px -apple-system, sans-serif";
+      ctx.fillStyle = "rgba(234,246,255,0.5)";
+      ctx.textAlign = "right";
+      ctx.fillText(dir ? "▲" : "▼", x + w, y);
+    }
+
+    function drawMotorPanel(ctx, x, y, motorL, motorR) {
+      const w = 230, h = 96;
+      glassPanel(ctx, x, y, w, h, 12);
+      ctx.font = "700 10px -apple-system, sans-serif";
+      ctx.fillStyle = "rgba(234,246,255,0.5)";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText("DRIVE", x + 18, y + 24);
+
+      drawMotorRow(ctx, x + 18, y + 46, w - 36, "L", motorL);
+      drawMotorRow(ctx, x + 18, y + 74, w - 36, "R", motorR);
+    }
+
+    function drawGpsPill(ctx, cx, y) {
+      const w = 240, h = 28;
+      const x = cx - w / 2;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, h / 2);
+      ctx.fillStyle = "rgba(8,14,20,0.5)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.12)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(234,246,255,0.4)";
+      ctx.font = "700 10px -apple-system, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("GPS NOT CONNECTED", cx, y + h / 2 + 1);
     }
 
     let latestTelemetry = null;
@@ -183,14 +336,12 @@
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (latestTelemetry) {
         const t = latestTelemetry;
-        drawCompass(ctx, 1180, 80, 60, t.hdg ?? 0);
-        drawMotorBar(ctx, 40, 480, 40, 120, "L", t.motor?.l?.dir ?? 1, t.motor?.l?.pwm ?? 0);
-        drawMotorBar(ctx, 100, 480, 40, 120, "R", t.motor?.r?.dir ?? 1, t.motor?.r?.pwm ?? 0);
-        drawServoReadout(ctx, 20, 30, t.servo ?? {});
-        ctx.fillStyle = "#0a0";
-        ctx.font = "13px monospace";
-        ctx.textAlign = "left";
-        ctx.fillText("GPS -- / -- (not wired up yet)", 20, 690);
+        const margin = 24;
+
+        drawHeadingTape(ctx, canvas.width / 2, 46, 460, t.hdg ?? 0);
+        drawServoPanel(ctx, margin, canvas.height - margin - 178, t.servo ?? {});
+        drawMotorPanel(ctx, canvas.width - margin - 230, canvas.height - margin - 96, t.motor?.l, t.motor?.r);
+        drawGpsPill(ctx, canvas.width / 2, canvas.height - margin - 28);
       }
       requestAnimationFrame(render);
     }
@@ -200,9 +351,9 @@
     let ws;
     function startControlSocket() {
       ws = new WebSocket(`ws://${location.hostname}:${CONTROL_WS_PORT}`);
-      ws.onopen = () => { statusEl.textContent = "live"; };
-      ws.onclose = () => { statusEl.textContent = "control ws closed"; };
-      ws.onerror = () => { statusEl.textContent = "control ws error"; };
+      ws.onopen = () => { setStatus("live", "live"); };
+      ws.onclose = () => { setStatus("control offline", "error"); };
+      ws.onerror = () => { setStatus("control error", "error"); };
       ws.onmessage = (event) => {
         latestTelemetry = JSON.parse(event.data);
       };
@@ -223,7 +374,7 @@
         });
       });
 
-      document.querySelectorAll("button[data-servo-toggle]").forEach((btn) => {
+      document.querySelectorAll("[data-servo-toggle]").forEach((btn) => {
         btn.addEventListener("click", () => {
           const on = btn.classList.toggle("active");
           sendCommand({ type: "servo", name: btn.dataset.servoToggle, pos: on ? 180 : 0 });
