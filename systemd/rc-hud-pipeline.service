@@ -9,8 +9,8 @@ User=admincam
 WorkingDirectory=/home/admincam/RC-ptz-with-hud
 # MAIN_CAM=0 / INSET_CAM=1 confirmed via `rpicam-hello --list-cameras` --
 # re-check if a camera is ever added/removed/reseated, indices can change.
-# pip_stream.sh writes its own PID to /tmp/rc-hud-pip-stream.pid so the web
-# app's POST /api/pip/swap endpoint can signal it to swap camera roles live.
+# Camera roles are fixed for the life of this service -- to swap which
+# camera is main vs. inset, change these values and restart the service.
 Environment=MAIN_CAM=0
 Environment=INSET_CAM=1
 ExecStart=/home/admincam/RC-ptz-with-hud/pipeline/pip_stream.sh
