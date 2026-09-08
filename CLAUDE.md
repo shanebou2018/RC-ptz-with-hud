@@ -23,8 +23,8 @@ Status: **early scaffolding, moving toward a first bench test**. Current phase: 
 
 Before building out the second camera and PIP compositing, the goal is to get one full vertical slice working on real hardware: Pi 5 + one camera + RTSP stream + ESP32 over serial + HUD web page with live compass/servo/motor readout and on-screen controls that actually drive the hardware.
 
-- `pipeline/single_cam_stream.sh` — `rpicam-vid` (libav backend, forced to software `libx264`) pushing RTSP straight to MediaMTX, no compositor. Use `pipeline/pip_stream.sh` instead once camera #2 is added — see the "Video pipeline" note below on why this isn't GStreamer-based.
-- `systemd/rc-hud-pipeline.service` currently points at `single_cam_stream.sh` for this reason — switch it back to `pip_stream.sh` when going dual-camera.
+- `pipeline/single_cam_stream.sh` — `rpicam-vid` (libav backend, forced to software `libx264`) pushing RTSP straight to MediaMTX, no compositor.
+- Camera #2 is now physically attached — `pipeline/pip_stream.sh` has been rewritten to composite both feeds (see "Video pipeline" note below), but **has not yet been run on hardware with both cameras**. `systemd/rc-hud-pipeline.service` still points at `single_cam_stream.sh` until `pip_stream.sh` is confirmed working — switch it over once verified.
 - The web HUD (`web/static/index.html`) already includes on-screen sliders/buttons for all 6 servos and both drive motors, wired to the control websocket — so this phase also validates the *control* path (browser → Pi → ESP32), not just telemetry display.
 
 ## Key architectural decision: HUD is not burned into the RTSP feed
@@ -54,25 +54,29 @@ Confirm with the user before changing any of the above, and update this section 
 
 Broadcom pulled the encode block for Pi 5 (decode-only VPU now) — camera capture + encode is CPU (software x264), and doubles up once PIP compositing brings a second camera into the same pipeline. At 1080p30 this will pin cores. Plan on **720p15–20 per camera**, or MJPEG if dodging encoder cost matters more than bandwidth.
 
-**Confirmed on real hardware (Debian trixie / Raspberry Pi OS): GStreamer's `rtspclientsink` is not usable.** It ships in GStreamer's Rust plugin set (`gst-plugins-rs`), which Debian trixie's apt repos don't carry as a built package (only unbuilt Rust source crates). `pipeline/single_cam_stream.sh` was rewritten around this: it uses `rpicam-vid`'s built-in `--codec libav` output mode to push RTSP directly, with `--libav-video-codec` forced to `libx264` (software) since that backend's own default, `h264_v4l2m2m`, assumes a hardware encoder Pi 5 doesn't have. This avoids GStreamer for the video path entirely in the single-camera case. `pipeline/pip_stream.sh` (dual-camera) **still uses the old GStreamer `compositor` + `rtspclientsink` approach and has the same problem** — it'll need an equivalent rework (likely GStreamer `compositor` + a different sink, or an ffmpeg-based compositing step) before dual-camera testing, and hasn't been touched yet.
+**Confirmed on real hardware (Debian trixie / Raspberry Pi OS): GStreamer's `rtspclientsink` is not usable.** It ships in GStreamer's Rust plugin set (`gst-plugins-rs`), which Debian trixie's apt repos don't carry as a built package (only unbuilt Rust source crates). `pipeline/single_cam_stream.sh` was rewritten around this: it uses `rpicam-vid`'s built-in `--codec libav` output mode to push RTSP directly, with `--libav-video-codec` forced to `libx264` (software) since that backend's own default, `h264_v4l2m2m`, assumes a hardware encoder Pi 5 doesn't have.
+
+`pipeline/pip_stream.sh` (dual-camera) has been reworked the same way, but since there's no single-process tool that both captures two cameras *and* composites them, it's built differently: two `rpicam-vid` processes (one per camera, `--codec yuv420` raw output) each write into a named pipe, and a single `ffmpeg` process reads both pipes, composites the inset with its `overlay` filter, encodes with software `libx264`, and pushes RTSP via `ffmpeg`'s own RTSP muxer — the same underlying mechanism `rpicam-vid --codec libav` uses internally, which is already proven working on this hardware. GStreamer is no longer used anywhere in the video path. **Not yet run on hardware with both cameras attached** — first test pending.
 
 ## Architecture
 
 ```
-Cam0 (CSI) ── rpicam-vid (libav, software libx264) ── RTSP push ──► MediaMTX ──► WebRTC (WHEP) out ──► browser <video>
-                                                                                                          ▲
-ESP32 (motors, 6 servos, compass) ──USB serial──► Python bridge ──► websocket ──┴──► canvas HUD + on-screen controls
-                                     ◄──────────────────────────────────────────┘         (commands flow back down)
+Cam0 (main, CSI) ──┐
+                    ├─ rpicam-vid x2 (raw yuv420, one per cam) ──► named pipes ──► ffmpeg (overlay composite,
+Cam1 (inset, CSI) ──┘                                                              software libx264, RTSP push) ──► MediaMTX ──► WebRTC (WHEP) out ──► browser <video>
+                                                                                                                                                          ▲
+ESP32 (motors, 6 servos, compass) ──USB serial──► Python bridge ──► websocket ──────────────────────────────────────────────────────────────────────────┴──► canvas HUD + on-screen controls
+                                     ◄──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘         (commands flow back down)
 ```
 
-(Once camera #2 is added, this goes back to a GStreamer `compositor` for PIP before encode — see `pipeline/pip_stream.sh`, which needs the `rtspclientsink` rework described above first.)
+(Single-camera mode — `pipeline/single_cam_stream.sh` — skips the compositing step: one `rpicam-vid --codec libav` process does capture + encode + RTSP push directly.)
 
 - **MediaMTX** (formerly rtsp-simple-server) is the RTSP/WebRTC server — a single pre-built binary, config-only, not something we write. Handles both RTSP consumers (`rtsp://<pi>:8554/robot`) and gives a WebRTC (WHEP) endpoint for the web page (`http://<pi>:8889/robot`) for free.
-- **`rpicam-vid`** (current, single-camera) does capture + software encode + RTSP push in one process — see `pipeline/single_cam_stream.sh`. **GStreamer** is still the plan for PiP compositing once there are 2 cameras, but `pipeline/pip_stream.sh`'s publish step needs reworking (see above) before it'll actually run.
+- **`rpicam-vid`** does the actual camera capture in both scripts. Single-camera: one process handles capture + encode + RTSP push itself (`--codec libav`). Dual-camera: two processes emit raw frames only, and `ffmpeg` does the compositing + encode + RTSP push. **GStreamer is no longer used anywhere in the video path** — both `rtspclientsink` (single-camera) and the old `compositor` + `rtspclientsink` (dual-camera) hit the same missing-Rust-plugin wall on Debian trixie.
 - **Web app** (FastAPI) serves the HUD page: embeds a MediaMTX WHEP video player + a canvas HUD layer (compass dial, servo readout, motor bars) + on-screen servo/motor controls, all driven over one websocket. See `web/`.
 - **Control/telemetry bridge**: a Python asyncio service that's the single point of contact with the ESP32 over USB serial — bidirectional: ESP32 → Pi telemetry lines get broadcast to every websocket client, and any command a client sends gets written straight to the ESP32. See `control/esp32_bridge.py`.
 
-PiP toggle (swap which camera is the inset) should be done live via the GStreamer `compositor` pads' `xpos`/`ypos`/`width`/`height`/`zorder` properties (dynamic property push), not by rebuilding the pipeline — relevant once dual-camera is back in play.
+PiP toggle (swap which camera is the inset) doesn't have a live/dynamic mechanism in the current `ffmpeg`-based design — the old plan (GStreamer `compositor` pad property push) no longer applies since GStreamer isn't in this path anymore. For now, swapping which camera is the inset means restarting `pip_stream.sh` with `MAIN_CAM`/`INSET_CAM` swapped; a true live-swap mechanism (e.g. `ffmpeg`'s `sendcmd`/`zmq` filters, or restarting just the encode stage) is a later refinement, not yet built.
 
 ## Serial protocol (Pi ↔ ESP32)
 
@@ -142,7 +146,7 @@ None of this has been exercised against real motors — it's been verified again
 ## Repo layout
 
 - `pipeline/single_cam_stream.sh` — single-camera capture/encode script (current bench-test phase). **Verified working on real Pi 5 hardware** — camera → MediaMTX → VLC over RTSP confirmed live.
-- `pipeline/pip_stream.sh` — dual-camera PiP capture/encode script (for once camera #2 is added). **Needs rework** — still uses the GStreamer `rtspclientsink` approach that doesn't work on Debian trixie (see "Video pipeline constraint" above).
+- `pipeline/pip_stream.sh` — dual-camera PiP capture/composite/encode script (2x `rpicam-vid` raw → named pipes → `ffmpeg` overlay + encode + RTSP push). Reworked off GStreamer, per "Video pipeline constraint" above — **not yet tested on hardware with both cameras**.
 - `mediamtx/mediamtx.yml` — MediaMTX config (RTSP + WebRTC/WHEP, `robot` path).
 - `control/esp32_bridge.py` — bidirectional Pi ↔ ESP32 bridge: serial ↔ websocket, plus a `--fake` mode that simulates the ESP32 in-process for HUD development without hardware.
 - `control/esp32_firmware/esp32_firmware.ino` — ESP32 sketch: drives the 2 drive motors + 6 servos, reads the compass, speaks the serial protocol above. **Not yet compiled or run on hardware.**
@@ -156,8 +160,8 @@ None of this has been exercised against real motors — it's been verified again
 - **Serial protocol** above is a first draft, unvalidated against real firmware/hardware behavior.
 - GPS module part not chosen; not currently part of the ESP32's responsibilities.
 - Outdoor/weatherproofing needs for the camera housings not yet discussed.
-- Camera FOV mix (standard+wide vs. two standard) not decided, moot until camera #2 is bought.
-- **`pipeline/pip_stream.sh` (dual-camera) is known-broken** on Debian trixie for the same `rtspclientsink` reason `single_cam_stream.sh` was — needs the same kind of rework before dual-camera testing.
+- Camera #2 is now physically attached (both are `ov5647`, same sensor — confirm whether that's the final pair or one/both get swapped for something else later, and whether a standard+wide FOV mix is still wanted).
+- **`pipeline/pip_stream.sh` has been rewritten** (ffmpeg-based, see "Video pipeline constraint" above) but **not yet run on hardware with both cameras** — treat it like `single_cam_stream.sh` was before its first real test: probably has bugs to shake out.
 - **`MAX_MOTOR_PWM` (200) and `COMMAND_TIMEOUT_MS` (500ms)** in "Motor safety" above are starting guesses, not validated against a real drivetrain — re-check both once real motors are wired up.
 - **Fire/load pulse angles (40°/120°) and hold time (500ms)** in "Fire/load pulse behavior" above are first guesses from the user, not yet checked against the actual mechanism they're driving (a linkage, a trigger, etc.) — confirm once wired up.
 
@@ -165,7 +169,7 @@ None of this has been exercised against real motors — it's been verified again
 
 - Prefer Python for Pi-side capture/control (best support for `picamera2`/`libcamera` and serial/websocket libraries) and for the web backend (FastAPI).
 - Keep the video pipeline and the control/HUD pipeline decoupled — each should be developed and tested independently (e.g. the HUD can be built and iterated against simulated ESP32 telemetry via `control/esp32_bridge.py --fake` before real hardware is wired up).
-- This project targets real Pi 5 + camera + ESP32 hardware — most of it cannot be fully verified in a dev-machine-only session. Say so explicitly rather than claiming something works when only the code was written, not run on hardware. Verified so far on real Pi 5 hardware: the single-camera capture/encode/RTSP pipeline (`pipeline/single_cam_stream.sh`, camera → MediaMTX → VLC, confirmed live video), **and the full HUD web page itself** — MediaMTX's WHEP video embed showing live camera video in-browser, plus the control websocket, canvas HUD (compass/servo/motor readout), and on-screen controls all working end-to-end against `control/esp32_bridge.py --fake` running on the Pi. What hasn't been touched yet: the ESP32 firmware/serial link (still simulated via `--fake`) and `pip_stream.sh` (dual-camera).
+- This project targets real Pi 5 + camera + ESP32 hardware — most of it cannot be fully verified in a dev-machine-only session. Say so explicitly rather than claiming something works when only the code was written, not run on hardware. Verified so far on real Pi 5 hardware: the single-camera capture/encode/RTSP pipeline (`pipeline/single_cam_stream.sh`, camera → MediaMTX → VLC, confirmed live video), **and the full HUD web page itself** — MediaMTX's WHEP video embed showing live camera video in-browser, plus the control websocket, canvas HUD (compass/servo/motor readout), and on-screen controls all working end-to-end against `control/esp32_bridge.py --fake` running on the Pi. What hasn't been touched yet: the ESP32 firmware/serial link (still simulated via `--fake`), and `pip_stream.sh` (dual-camera) — written and syntax-checked, not yet run against real hardware.
 - Running the full stack takes 4 separate long-running processes at once (MediaMTX, the camera pipeline, the ESP32 bridge, the web app) — each needs its own terminal/session left untouched, since typing a new command into one of these windows kills whatever was running there. This tripped up the first hardware bench test; `systemd/*.service` exists specifically to avoid this manual juggling once things are stable enough to run unattended.
 - **The systemd units are installed and confirmed working on the bench-test Pi**: all 4 services (`rc-hud-mediamtx`, `rc-hud-pipeline`, `rc-hud-control`, `rc-hud-web`) enabled and running, and verified to survive a full `sudo reboot` — video + the (still `--fake`) HUD both come up automatically with zero manual terminal work. The unit files in `systemd/` are hardcoded to this specific Pi's real setup (user `admincam`, repo at `/home/admincam/RC-ptz-with-hud`, MediaMTX at `/home/admincam/mediamtx`) rather than generic placeholders, since they're meant to be installed as-is on this rig.
 - As run/build commands solidify, document them here (how to start each service, how to test on a dev machine without a Pi attached, systemd unit install steps, etc.).
