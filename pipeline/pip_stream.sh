@@ -27,8 +27,8 @@
 # treats the new RTSP publish as a fresh stream that existing WebRTC
 # viewers don't pick up on their own).
 #
-# NOT YET TESTED ON HARDWARE (the swap path specifically -- the underlying
-# dual-camera stream itself is already verified).
+# Confirmed working on real hardware: pressing "P" swaps the camera roles
+# with no manual page refresh needed.
 set -uo pipefail
 
 # Camera indices are libcamera's own numbers from `rpicam-hello
