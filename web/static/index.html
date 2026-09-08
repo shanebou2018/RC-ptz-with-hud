@@ -111,7 +111,7 @@
     </div>
   </div>
 
-  <div id="keyHint">&larr;&rarr; pan &middot; &uarr;&darr; tilt &middot; I / O zoom &middot; F fire &middot; L load &middot; W A S D drive (speed set above) &middot; Esc stop</div>
+  <div id="keyHint">&larr;&rarr; pan &middot; &uarr;&darr; tilt &middot; I / O zoom &middot; F fire &middot; L load &middot; W A S D drive (speed set above) &middot; Esc stop &middot; P swap cameras</div>
 
   <script>
     // MediaMTX serves its own WHEP endpoint; the browser talks to it
@@ -471,6 +471,29 @@
     let driveLocked = false;
     const DRIVE_KEYS = ["KeyW", "KeyA", "KeyS", "KeyD"];
 
+    // Swaps which camera is the PiP inset. pipeline/pip_stream.sh restarts
+    // its own capture with the roles flipped on receiving this -- expect a
+    // few seconds of video interruption while it does, same as any camera
+    // restart. No-op (with a status flash) if the Pi's running
+    // single_cam_stream.sh instead, since there's no second feed to swap.
+    async function swapPip() {
+      setStatus("swapping cameras…", statusEl.className);
+      try {
+        const res = await fetch("/api/pip/swap", { method: "POST" });
+        if (!res.ok) {
+          setStatus("pip swap unavailable", "error");
+          return;
+        }
+      } catch {
+        setStatus("pip swap unavailable", "error");
+        return;
+      }
+      // No completion signal from the Pi -- pip_stream.sh's restart takes a
+      // few seconds, so just revert the badge after a guess at that delay
+      // rather than leaving it stuck on "swapping" forever.
+      setTimeout(() => setStatus("live", "live"), 3000);
+    }
+
     function stopDrive() {
       driveLocked = true;
       setMotor("l", 0);
@@ -508,6 +531,9 @@
       } else if (event.code === "Escape" && !event.repeat) {
         event.preventDefault();
         stopDrive();
+      } else if (event.code === "KeyP" && !event.repeat) {
+        event.preventDefault();
+        swapPip();
       }
     });
 

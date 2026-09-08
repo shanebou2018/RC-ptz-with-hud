@@ -7,11 +7,13 @@ Requires=rc-hud-mediamtx.service
 Type=simple
 User=admincam
 WorkingDirectory=/home/admincam/RC-ptz-with-hud
-# CAM=0 is this Pi's ov5647 camera index (confirmed via `rpicam-hello
-# --list-cameras`). single_cam_stream.sh for the current one-camera bench
-# test; switch to pip_stream.sh once a second camera is added.
-Environment=CAM=0
-ExecStart=/home/admincam/RC-ptz-with-hud/pipeline/single_cam_stream.sh
+# MAIN_CAM=0 / INSET_CAM=1 confirmed via `rpicam-hello --list-cameras` --
+# re-check if a camera is ever added/removed/reseated, indices can change.
+# pip_stream.sh writes its own PID to /tmp/rc-hud-pip-stream.pid so the web
+# app's POST /api/pip/swap endpoint can signal it to swap camera roles live.
+Environment=MAIN_CAM=0
+Environment=INSET_CAM=1
+ExecStart=/home/admincam/RC-ptz-with-hud/pipeline/pip_stream.sh
 Restart=on-failure
 RestartSec=2
 
