@@ -7,18 +7,28 @@
 # GStreamer's compositor + rtspclientsink -- rtspclientsink isn't available
 # on Debian trixie (see CLAUDE.md's "Video pipeline constraint" section).
 #
-# Two rpicam-vid processes each write raw YUV420 frames into a named pipe;
-# a single ffmpeg process reads both, composites the inset over the main
-# feed with its overlay filter, encodes (software libx264 -- Pi 5 has no
-# hardware encoder), and pushes RTSP. Confirmed working on real hardware.
+# Both rpicam-vid processes run for this script's ENTIRE lifetime and are
+# never restarted for a swap -- only which FIFO feeds ffmpeg's "main" vs
+# "inset" role changes. This matters: Raspberry Pi camera hardware init
+# (sensor mode negotiation, AWB/AGC convergence) takes 1-3+ seconds, which
+# an earlier version of this script paid on every swap because it killed
+# and relaunched rpicam-vid. Keeping the cameras always-on means a swap
+# only restarts the much lighter ffmpeg process -- no camera hardware
+# touched at all. While ffmpeg is down between restarts, rpicam-vid's
+# write() calls to their FIFOs simply block (standard named-pipe
+# backpressure) rather than erroring -- frames resume the instant the new
+# ffmpeg reopens the pipes, camera lock never lost.
 #
 # Live camera swap: send this script's process SIGUSR1 (e.g. `kill -USR1
-# $(cat "$PIDFILE")`) and it restarts its own rpicam-vid/ffmpeg children
-# with MAIN_CAM/INSET_CAM's roles flipped -- systemd only ever sees one
-# long-running process, so this needs no service restart / sudo. The web
-# app's POST /api/pip/swap endpoint does exactly that; the HUD page's "P"
-# key calls it. NOT YET TESTED ON HARDWARE (the swap path specifically --
-# the underlying dual-camera stream itself is already verified).
+# $(cat "$PIDFILE")`) and it restarts just its ffmpeg composite/encode
+# stage with MAIN_CAM/INSET_CAM's roles flipped. The web app's POST
+# /api/pip/swap endpoint does exactly that; the HUD page's "P" key calls
+# it (and re-negotiates its WHEP connection shortly after, since MediaMTX
+# treats the new RTSP publish as a fresh stream that existing WebRTC
+# viewers don't pick up on their own).
+#
+# NOT YET TESTED ON HARDWARE (the swap path specifically -- the underlying
+# dual-camera stream itself is already verified).
 set -uo pipefail
 
 # Camera indices are libcamera's own numbers from `rpicam-hello
@@ -27,20 +37,16 @@ set -uo pipefail
 MAIN_CAM="${MAIN_CAM:-0}"
 INSET_CAM="${INSET_CAM:-1}"
 
-MAIN_WIDTH="${MAIN_WIDTH:-1280}"
-MAIN_HEIGHT="${MAIN_HEIGHT:-720}"
+# Both cameras always capture at this same resolution -- since neither is
+# ever restarted, there's no separate "inset capture size" to worry about
+# anymore; whichever role a camera plays, ffmpeg scales it down for the
+# inset box as needed (see INSET_WIDTH/INSET_HEIGHT). Kept at a size known
+# safe from the row-stride corruption bug hit during development (height
+# must be a multiple of 16 -- 720 is, arbitrary small sizes like 180
+# weren't; see git history) rather than an arbitrary small resolution.
+CAM_WIDTH="${CAM_WIDTH:-1280}"
+CAM_HEIGHT="${CAM_HEIGHT:-720}"
 
-# INSET_CAP_* is what the inset camera actually captures at -- kept at a
-# real supported sensor mode (see `rpicam-hello --list-cameras`) rather
-# than the small on-screen PiP size, because requesting an arbitrary small
-# raw YUV420 resolution directly (e.g. 320x180) risks a row-stride/padding
-# mismatch between what rpicam-vid actually outputs and what ffmpeg's
-# rawvideo demuxer is told to expect -- corrupts every frame after the
-# first into unreadable blocks (confirmed on hardware). ffmpeg's own
-# `scale` filter (below) does the actual downscale to
-# INSET_WIDTH/INSET_HEIGHT instead.
-INSET_CAP_WIDTH="${INSET_CAP_WIDTH:-640}"
-INSET_CAP_HEIGHT="${INSET_CAP_HEIGHT:-480}"
 INSET_WIDTH="${INSET_WIDTH:-480}"
 INSET_HEIGHT="${INSET_HEIGHT:-270}"
 FRAMERATE="${FRAMERATE:-20}"
@@ -56,29 +62,33 @@ PIDFILE="${PIDFILE:-/tmp/rc-hud-pip-stream.pid}"
 echo $$ > "${PIDFILE}"
 
 RUN_DIR="$(mktemp -d /tmp/pip_stream.XXXXXX)"
-MAIN_FIFO="${RUN_DIR}/main.yuv"
-INSET_FIFO="${RUN_DIR}/inset.yuv"
+# Fixed to which physical camera they carry -- CAM_A is always MAIN_CAM's
+# feed, CAM_B is always INSET_CAM's, for the life of this script. "Which
+# one is visually the main/inset" is decided purely by ffmpeg's input
+# order each time it (re)starts, not by which camera writes to which FIFO.
+CAM_A_FIFO="${RUN_DIR}/cam_a.yuv"
+CAM_B_FIFO="${RUN_DIR}/cam_b.yuv"
+mkfifo "${CAM_A_FIFO}" "${CAM_B_FIFO}"
 
-MAIN_PID=""
-INSET_PID=""
+CAM_A_PID=""
+CAM_B_PID=""
 FFMPEG_PID=""
 SWAPPED=0
 SWAP_REQUESTED=0
 STOPPING=0
 
-stop_session() {
+stop_ffmpeg() {
   [ -n "${FFMPEG_PID}" ] && kill "${FFMPEG_PID}" 2>/dev/null
-  [ -n "${MAIN_PID}" ] && kill "${MAIN_PID}" 2>/dev/null
-  [ -n "${INSET_PID}" ] && kill "${INSET_PID}" 2>/dev/null
   [ -n "${FFMPEG_PID}" ] && wait "${FFMPEG_PID}" 2>/dev/null
-  [ -n "${MAIN_PID}" ] && wait "${MAIN_PID}" 2>/dev/null
-  [ -n "${INSET_PID}" ] && wait "${INSET_PID}" 2>/dev/null
-  rm -f "${MAIN_FIFO}" "${INSET_FIFO}"
-  MAIN_PID=""; INSET_PID=""; FFMPEG_PID=""
+  FFMPEG_PID=""
 }
 
 final_cleanup() {
-  stop_session
+  stop_ffmpeg
+  [ -n "${CAM_A_PID}" ] && kill "${CAM_A_PID}" 2>/dev/null
+  [ -n "${CAM_B_PID}" ] && kill "${CAM_B_PID}" 2>/dev/null
+  [ -n "${CAM_A_PID}" ] && wait "${CAM_A_PID}" 2>/dev/null
+  [ -n "${CAM_B_PID}" ] && wait "${CAM_B_PID}" 2>/dev/null
   rm -rf "${RUN_DIR}"
   rm -f "${PIDFILE}"
 }
@@ -86,37 +96,37 @@ trap final_cleanup EXIT
 trap 'STOPPING=1' INT TERM
 trap 'SWAP_REQUESTED=1' USR1
 
+# Started once, run continuously -- see the header comment for why. Both
+# rpicam-vid blocks opening a FIFO for write until something opens it for
+# read, so starting these before ffmpeg is safe -- no manual wait needed.
+rpicam-vid -t 0 --camera "${MAIN_CAM}" --codec yuv420 \
+  --width "${CAM_WIDTH}" --height "${CAM_HEIGHT}" --framerate "${FRAMERATE}" \
+  -o "${CAM_A_FIFO}" &
+CAM_A_PID=$!
+
+rpicam-vid -t 0 --camera "${INSET_CAM}" --codec yuv420 \
+  --width "${CAM_WIDTH}" --height "${CAM_HEIGHT}" --framerate "${FRAMERATE}" \
+  -o "${CAM_B_FIFO}" &
+CAM_B_PID=$!
+
 while [ "${STOPPING}" -eq 0 ]; do
   if [ "${SWAPPED}" -eq 0 ]; then
-    EFF_MAIN="${MAIN_CAM}"; EFF_INSET="${INSET_CAM}"
+    MAIN_FIFO="${CAM_A_FIFO}"; INSET_FIFO="${CAM_B_FIFO}"
   else
-    EFF_MAIN="${INSET_CAM}"; EFF_INSET="${MAIN_CAM}"
+    MAIN_FIFO="${CAM_B_FIFO}"; INSET_FIFO="${CAM_A_FIFO}"
   fi
 
-  mkfifo "${MAIN_FIFO}" "${INSET_FIFO}"
-
-  # rpicam-vid blocks opening a FIFO for write until something opens it for
-  # read, so starting these before ffmpeg is safe -- no manual wait needed.
-  rpicam-vid -t 0 --camera "${EFF_MAIN}" --codec yuv420 \
-    --width "${MAIN_WIDTH}" --height "${MAIN_HEIGHT}" --framerate "${FRAMERATE}" \
-    -o "${MAIN_FIFO}" &
-  MAIN_PID=$!
-
-  rpicam-vid -t 0 --camera "${EFF_INSET}" --codec yuv420 \
-    --width "${INSET_CAP_WIDTH}" --height "${INSET_CAP_HEIGHT}" --framerate "${FRAMERATE}" \
-    -o "${INSET_FIFO}" &
-  INSET_PID=$!
-
   ffmpeg -loglevel warning \
-    -f rawvideo -pix_fmt yuv420p -s "${MAIN_WIDTH}x${MAIN_HEIGHT}" -r "${FRAMERATE}" -i "${MAIN_FIFO}" \
-    -f rawvideo -pix_fmt yuv420p -s "${INSET_CAP_WIDTH}x${INSET_CAP_HEIGHT}" -r "${FRAMERATE}" -i "${INSET_FIFO}" \
+    -f rawvideo -pix_fmt yuv420p -s "${CAM_WIDTH}x${CAM_HEIGHT}" -r "${FRAMERATE}" -i "${MAIN_FIFO}" \
+    -f rawvideo -pix_fmt yuv420p -s "${CAM_WIDTH}x${CAM_HEIGHT}" -r "${FRAMERATE}" -i "${INSET_FIFO}" \
     -filter_complex "[1:v]scale=${INSET_WIDTH}:${INSET_HEIGHT}[pip];[0:v][pip]overlay=W-w-${INSET_MARGIN}:H-h-${INSET_MARGIN}[out]" \
     -map "[out]" -c:v libx264 -preset ultrafast -tune zerolatency -b:v "${BITRATE}" \
     -f rtsp -rtsp_transport tcp "rtsp://${MEDIAMTX_HOST}:${MEDIAMTX_PORT}/${STREAM_PATH}" &
   FFMPEG_PID=$!
 
   # Wait for either a swap request or ffmpeg exiting on its own (a real
-  # error -- rpicam-vid crashing, MediaMTX unreachable, etc).
+  # error -- MediaMTX unreachable, etc). Polled quickly (50ms) since this
+  # is now the entire swap-detection latency budget that matters.
   CRASHED=1
   while kill -0 "${FFMPEG_PID}" 2>/dev/null; do
     if [ "${SWAP_REQUESTED}" -eq 1 ]; then
@@ -129,10 +139,10 @@ while [ "${STOPPING}" -eq 0 ]; do
       CRASHED=0
       break
     fi
-    sleep 0.2
+    sleep 0.05
   done
 
-  stop_session
+  stop_ffmpeg
 
   # Crash-loop guard: only pause before restarting if ffmpeg exited on its
   # own (not a deliberate swap or a stop request), so a real, persistent

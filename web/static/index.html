@@ -147,33 +147,45 @@
       statusEl.className = state || "";
     }
 
+    // Held at module scope (not local to startVideo()) so swapPip() below
+    // can close and replace it to re-negotiate after a camera swap.
+    let pc = null;
+
+    // Never throws -- always resolves, reporting failure via setStatus, so
+    // callers (including swapPip()'s re-negotiation) can safely await it
+    // without needing their own try/catch.
     async function startVideo() {
-      const pc = new RTCPeerConnection();
-      pc.addTransceiver("video", { direction: "recvonly" });
-      pc.ontrack = (event) => {
-        document.getElementById("video").srcObject = event.streams[0];
-      };
-      pc.onconnectionstatechange = () => {
-        if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
-          setStatus("video " + pc.connectionState, "error");
+      try {
+        pc?.close();
+        pc = new RTCPeerConnection();
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.ontrack = (event) => {
+          document.getElementById("video").srcObject = event.streams[0];
+        };
+        pc.onconnectionstatechange = () => {
+          if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
+            setStatus("video " + pc.connectionState, "error");
+          }
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const whepUrl = `http://${MEDIAMTX_HOST}:${MEDIAMTX_WEBRTC_PORT}/${STREAM_PATH}/whep`;
+        const res = await fetch(whepUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/sdp" },
+          body: offer.sdp,
+        });
+        if (!res.ok) {
+          setStatus(`WHEP error ${res.status}`, "error");
+          return;
         }
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      const whepUrl = `http://${MEDIAMTX_HOST}:${MEDIAMTX_WEBRTC_PORT}/${STREAM_PATH}/whep`;
-      const res = await fetch(whepUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/sdp" },
-        body: offer.sdp,
-      });
-      if (!res.ok) {
-        setStatus(`WHEP error ${res.status}`, "error");
-        return;
+        const answerSdp = await res.text();
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      } catch (err) {
+        setStatus("video connect failed", "error");
       }
-      const answerSdp = await res.text();
-      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
     }
 
     // ---- HUD drawing helpers -----------------------------------------------
@@ -471,10 +483,15 @@
     let driveLocked = false;
     const DRIVE_KEYS = ["KeyW", "KeyA", "KeyS", "KeyD"];
 
-    // Swaps which camera is the PiP inset. pipeline/pip_stream.sh restarts
-    // its own capture with the roles flipped on receiving this -- expect a
-    // few seconds of video interruption while it does, same as any camera
-    // restart. No-op (with a status flash) if the Pi's running
+    // Swaps which camera is the PiP inset. pip_stream.sh keeps both
+    // cameras running continuously and only restarts its much lighter
+    // ffmpeg composite/encode stage on this -- no camera hardware
+    // re-init, so the new RTSP publish is typically ready in well under a
+    // second. But MediaMTX treats that as a fresh stream, and this page's
+    // existing WHEP/WebRTC connection won't pick it up on its own even
+    // though the underlying transport often stays nominally "connected"
+    // -- so re-negotiate it explicitly rather than requiring a manual
+    // page refresh. No-op (with a status flash) if the Pi's running
     // single_cam_stream.sh instead, since there's no second feed to swap.
     async function swapPip() {
       setStatus("swapping cameras…", statusEl.className);
@@ -488,10 +505,16 @@
         setStatus("pip swap unavailable", "error");
         return;
       }
-      // No completion signal from the Pi -- pip_stream.sh's restart takes a
-      // few seconds, so just revert the badge after a guess at that delay
-      // rather than leaving it stuck on "swapping" forever.
-      setTimeout(() => setStatus("live", "live"), 3000);
+      // No completion signal from the Pi, so this delay is a guess at
+      // "long enough for ffmpeg to restart and publish" rather than a
+      // precise wait -- tune it down if real hardware consistently beats
+      // it, or up if the re-negotiation races the new stream.
+      setTimeout(async () => {
+        await startVideo();
+        if (statusEl.className !== "error") {
+          setStatus("live", "live");
+        }
+      }, 800);
     }
 
     function stopDrive() {
