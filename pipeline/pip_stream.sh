@@ -24,6 +24,17 @@ INSET_CAM="${INSET_CAM:-1}"
 
 MAIN_WIDTH="${MAIN_WIDTH:-1280}"
 MAIN_HEIGHT="${MAIN_HEIGHT:-720}"
+
+# INSET_CAP_* is what the inset camera actually captures at -- kept at a
+# real supported sensor mode (see `rpicam-hello --list-cameras`) rather
+# than the small on-screen PiP size, because requesting an arbitrary small
+# raw YUV420 resolution directly (e.g. 320x180) risks a row-stride/padding
+# mismatch between what rpicam-vid actually outputs and what ffmpeg's
+# rawvideo demuxer is told to expect -- corrupts every frame after the
+# first into unreadable blocks. ffmpeg's own `scale` filter (below) does
+# the actual downscale to INSET_WIDTH/INSET_HEIGHT instead.
+INSET_CAP_WIDTH="${INSET_CAP_WIDTH:-640}"
+INSET_CAP_HEIGHT="${INSET_CAP_HEIGHT:-480}"
 INSET_WIDTH="${INSET_WIDTH:-320}"
 INSET_HEIGHT="${INSET_HEIGHT:-180}"
 FRAMERATE="${FRAMERATE:-20}"
@@ -56,7 +67,7 @@ rpicam-vid -t 0 --camera "${MAIN_CAM}" --codec yuv420 \
 MAIN_PID=$!
 
 rpicam-vid -t 0 --camera "${INSET_CAM}" --codec yuv420 \
-  --width "${INSET_WIDTH}" --height "${INSET_HEIGHT}" --framerate "${FRAMERATE}" \
+  --width "${INSET_CAP_WIDTH}" --height "${INSET_CAP_HEIGHT}" --framerate "${FRAMERATE}" \
   -o "${INSET_FIFO}" &
 INSET_PID=$!
 
@@ -64,7 +75,7 @@ INSET_PID=$!
 # trap) with ffmpeg, leaking the two rpicam-vid processes once ffmpeg exits.
 ffmpeg -loglevel warning \
   -f rawvideo -pix_fmt yuv420p -s "${MAIN_WIDTH}x${MAIN_HEIGHT}" -r "${FRAMERATE}" -i "${MAIN_FIFO}" \
-  -f rawvideo -pix_fmt yuv420p -s "${INSET_WIDTH}x${INSET_HEIGHT}" -r "${FRAMERATE}" -i "${INSET_FIFO}" \
-  -filter_complex "[0:v][1:v]overlay=W-w-${INSET_MARGIN}:H-h-${INSET_MARGIN}[out]" \
+  -f rawvideo -pix_fmt yuv420p -s "${INSET_CAP_WIDTH}x${INSET_CAP_HEIGHT}" -r "${FRAMERATE}" -i "${INSET_FIFO}" \
+  -filter_complex "[1:v]scale=${INSET_WIDTH}:${INSET_HEIGHT}[pip];[0:v][pip]overlay=W-w-${INSET_MARGIN}:H-h-${INSET_MARGIN}[out]" \
   -map "[out]" -c:v libx264 -preset ultrafast -tune zerolatency -b:v "${BITRATE}" \
   -f rtsp -rtsp_transport tcp "rtsp://${MEDIAMTX_HOST}:${MEDIAMTX_PORT}/${STREAM_PATH}"
