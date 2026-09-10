@@ -1,0 +1,32 @@
+# PLACEHOLDER -- NOT REAL PIN ASSIGNMENTS.
+#
+# This file exists so `make vehicle.asc`/`make vehicle.bin` has something
+# to point nextpnr-ice40 at, but none of the pin names below have been
+# checked against the Alchitry Cu V2's actual iCE40 HX8K-CB132 pinout or
+# the Br breakout board's header layout. Get the real pin-to-signal
+# mapping from Alchitry's own Cu V2 pinout reference (alchitry.com) before
+# running this for real hardware -- every line here needs a real ballname
+# on the right, not the placeholder guesses below.
+#
+# set_io clk100mhz   <real pin>
+# set_io rst_n       <real pin>
+# set_io lora_aux    <real pin>
+# set_io lora_m0     <real pin>
+# set_io lora_m1     <real pin>
+# set_io lora_uart_tx <real pin>
+# set_io lora_uart_rx <real pin>
+# set_io servo_pan   <real pin>
+# set_io servo_tilt  <real pin>
+# set_io servo_focus <real pin>
+# set_io servo_zoom  <real pin>
+# set_io servo_fire  <real pin>
+# set_io servo_load  <real pin>
+# set_io motor_l_dir_pin <real pin>
+# set_io motor_l_pwm_pin <real pin>
+# set_io motor_r_dir_pin <real pin>
+# set_io motor_r_pwm_pin <real pin>
+# set_io compass_sclk <real pin>
+# set_io compass_mosi <real pin>
+# set_io compass_miso <real pin>
+# set_io compass_cs   <real pin>
+# set_io pi_uart_tx  <real pin>

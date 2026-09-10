@@ -39,44 +39,11 @@
     #status.live .dot { background: #2ee6a6; box-shadow: 0 0 6px #2ee6a6; }
     #status.error .dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
 
-    #controls { width: 1280px; margin: 20px auto 40px; display: flex; gap: 20px; }
-    .panel {
-      flex: 1; background: var(--panel-bg); border: 1px solid var(--panel-border);
-      border-radius: 14px; padding: 18px 22px;
-    }
-    .panel h2 {
-      margin: 0 0 16px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
-      color: var(--text-muted); font-weight: 700;
-    }
-    .slider-row { display: flex; align-items: center; gap: 14px; margin: 12px 0; }
-    .slider-row label {
-      width: 56px; font-size: 12px; color: var(--text-muted); font-weight: 700; letter-spacing: 0.03em;
-    }
-    .slider-row output { width: 40px; text-align: right; font: 700 13px var(--mono); color: var(--text); }
-    input[type=range] {
-      flex: 1; -webkit-appearance: none; height: 4px; border-radius: 2px;
-      background: rgba(255,255,255,0.12); outline: none;
-    }
-    input[type=range]::-webkit-slider-thumb {
-      -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
-      background: var(--accent); cursor: pointer; box-shadow: 0 0 8px rgba(0,212,255,0.6);
-      border: 2px solid var(--bg);
-    }
-    .chip-row { display: flex; gap: 10px; margin-top: 16px; }
-    .chip {
-      flex: 1; padding: 9px 0; text-align: center; border-radius: 8px;
-      border: 1px solid var(--panel-border); background: rgba(255,255,255,0.04);
-      color: var(--text-muted); font: 700 11px var(--sans); letter-spacing: 0.05em;
-      text-transform: uppercase; cursor: pointer; transition: all .15s ease;
-    }
-    .chip:hover { border-color: rgba(255,255,255,0.25); color: var(--text); }
-    .chip.active { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
-    .chip.stop { border-color: rgba(255,77,79,0.4); color: var(--danger); }
-    .chip.stop:hover { background: var(--danger-soft); border-color: var(--danger); }
-
-    #keyHint {
-      width: 1280px; margin: -20px auto 40px; text-align: center;
-      font-size: 11px; letter-spacing: 0.02em; color: var(--text-muted);
+    #viewOnlyNotice {
+      width: 1280px; margin: 16px auto 40px; text-align: center;
+      font-size: 12px; letter-spacing: 0.02em; color: var(--text-muted);
+      background: var(--panel-bg); border: 1px solid var(--panel-border);
+      border-radius: 10px; padding: 12px 0;
     }
   </style>
 </head>
@@ -87,31 +54,7 @@
     <div id="status"><span class="dot"></span><span id="statusText">connecting</span></div>
   </div>
 
-  <div id="controls">
-    <div class="panel">
-      <h2>Servos</h2>
-      <div class="slider-row"><label>Pan</label><input type="range" min="0" max="180" value="90" data-servo="pan"><output>90</output></div>
-      <div class="slider-row"><label>Tilt</label><input type="range" min="0" max="180" value="90" data-servo="tilt"><output>90</output></div>
-      <div class="slider-row"><label>Focus</label><input type="range" min="0" max="180" value="0" data-servo="focus"><output>0</output></div>
-      <div class="slider-row"><label>Zoom</label><input type="range" min="0" max="180" value="0" data-servo="zoom"><output>0</output></div>
-      <div class="chip-row">
-        <div class="chip" id="fireBtn" data-servo-toggle="fire">Fire</div>
-        <div class="chip" id="loadBtn" data-servo-toggle="load">Load</div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h2>Drive</h2>
-      <div class="slider-row"><label>Speed</label><input type="range" value="150" id="speedSlider"><output id="speedOutput">150</output></div>
-      <div class="slider-row"><label>Left</label><input type="range" value="0" data-motor="l"><output>0</output></div>
-      <div class="slider-row"><label>Right</label><input type="range" value="0" data-motor="r"><output>0</output></div>
-      <div class="chip-row">
-        <div class="chip stop" id="stopBtn">All stop</div>
-      </div>
-    </div>
-  </div>
-
-  <div id="keyHint">&larr;&rarr; pan &middot; &uarr;&darr; tilt &middot; I / O zoom &middot; F fire &middot; L load &middot; W A S D drive (speed set above) &middot; Esc stop</div>
+  <div id="viewOnlyNotice">View-only in this build &mdash; vehicle control is via the LoRa base station, not this page. See CLAUDE.md's fork section.</div>
 
   <script>
     // MediaMTX serves its own WHEP endpoint; the browser talks to it
@@ -120,24 +63,16 @@
     const MEDIAMTX_HOST = location.hostname;
     const MEDIAMTX_WEBRTC_PORT = 8889;
     const STREAM_PATH = "robot";
-    const CONTROL_WS_PORT = 8765;
+    const TELEMETRY_WS_PORT = 8765;
 
-    // ---- Safety limits — tune these for your hardware. Keep MAX_MOTOR_PWM
-    // in sync with MAX_MOTOR_PWM in control/esp32_firmware/esp32_firmware.ino
-    // and control/esp32_bridge.py. HEARTBEAT_INTERVAL_MS must stay well
-    // under the firmware's COMMAND_TIMEOUT_MS (500ms) or the deadman switch
-    // will cut the motors while you're still actively driving. ------------
+    // Display-scaling only in this fork -- NOT an authoritative safety
+    // limit here (control/vehicle_fpga_bridge.py has zero control
+    // authority; the vehicle FPGA's motor_pwm.v is what actually
+    // enforces MAX_MOTOR_PWM now). Used only to size the drive-motor
+    // bars in drawMotorRow() below. Keep in sync with
+    // fpga/common/rtl/packet_defs.vh's MAX_MOTOR_PWM if that ever
+    // changes, purely so the bars stay meaningfully scaled.
     const MAX_MOTOR_PWM = 200;
-    const HEARTBEAT_INTERVAL_MS = 200;
-
-    // ---- Keyboard control tuning --------------------------------------
-    const PAN_TILT_STEP_DEG = 2;   // per tick, while an arrow key is held
-    const ZOOM_STEP_DEG = 2;       // per tick, while I/O is held
-    const KEY_TICK_MS = 50;        // how often held keys are re-applied
-    // Cosmetic only (matches the ESP32's PULSE_HOLD_MS, but isn't what
-    // actually times the servo — see triggerPulse() below): how long the
-    // FIRE/LOAD button shows its "active" click-feedback state.
-    const FIRE_LOAD_PULSE_MS = 500;
 
     const statusEl = document.getElementById("status");
     const statusTextEl = document.getElementById("statusText");
@@ -370,205 +305,25 @@
       requestAnimationFrame(render);
     }
 
-    // ---- Control websocket: receives telemetry, sends commands -----------
+    // ---- Telemetry websocket: receive-only. control/vehicle_fpga_bridge.py
+    // never accepts commands from this page in this fork -- all vehicle
+    // control happens over a separate LoRa link between two FPGAs,
+    // entirely outside the Pi/browser. See CLAUDE.md's fork section. ------
 
     let ws;
-    function startControlSocket() {
-      ws = new WebSocket(`ws://${location.hostname}:${CONTROL_WS_PORT}`);
+    function startTelemetrySocket() {
+      ws = new WebSocket(`ws://${location.hostname}:${TELEMETRY_WS_PORT}`);
       ws.onopen = () => { setStatus("live", "live"); };
-      ws.onclose = () => { setStatus("control offline", "error"); };
-      ws.onerror = () => { setStatus("control error", "error"); };
+      ws.onclose = () => { setStatus("telemetry offline", "error"); };
+      ws.onerror = () => { setStatus("telemetry error", "error"); };
       ws.onmessage = (event) => {
         latestTelemetry = JSON.parse(event.data);
       };
     }
 
-    function sendCommand(cmd) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(cmd));
-      }
-    }
-
-    // ---- Shared setters: used by both mouse-driven sliders and the
-    // keyboard tick loop below, so the on-screen sliders always reflect
-    // whatever actually got sent, regardless of input source. ------------
-
-    function servoSliderEl(name) { return document.querySelector(`input[data-servo="${name}"]`); }
-    function motorSliderEl(side) { return document.querySelector(`input[data-motor="${side}"]`); }
-
-    function setServo(name, pos) {
-      pos = Math.max(0, Math.min(180, Math.round(pos)));
-      const input = servoSliderEl(name);
-      if (input) {
-        input.value = pos;
-        input.nextElementSibling.textContent = pos;
-      }
-      sendCommand({ type: "servo", name, pos });
-    }
-
-    function setMotor(side, value) {
-      value = Math.max(-MAX_MOTOR_PWM, Math.min(MAX_MOTOR_PWM, Math.round(value)));
-      const input = motorSliderEl(side);
-      if (input) {
-        input.value = value;
-        input.nextElementSibling.textContent = value;
-      }
-      sendCommand({ type: "motor", side, dir: value >= 0 ? 1 : 0, pwm: Math.abs(value) });
-    }
-
-    // Momentary trigger, not a toggle: the ESP32 firmware owns the actual
-    // swing-out-and-return sequence (non-blocking, via millis() — see
-    // esp32_firmware.ino) so it completes reliably even if this page's
-    // connection hiccups mid-pulse. "pos" is ignored for fire/load; any
-    // command just triggers it. The button's "active" class here is purely
-    // a click-feedback cue — the canvas HUD's FIRE/LOAD pills are the real
-    // status indicator, driven by live telemetry.
-    function triggerPulse(servoName, btnEl) {
-      sendCommand({ type: "servo", name: servoName, pos: 1 });
-      btnEl?.classList.add("active");
-      setTimeout(() => btnEl?.classList.remove("active"), FIRE_LOAD_PULSE_MS);
-    }
-
-    function wireControls() {
-      document.querySelectorAll("input[data-servo]").forEach((input) => {
-        const output = input.nextElementSibling;
-        input.addEventListener("input", () => {
-          output.textContent = input.value;
-          sendCommand({ type: "servo", name: input.dataset.servo, pos: Number(input.value) });
-        });
-      });
-
-      document.querySelectorAll("[data-servo-toggle]").forEach((btn) => {
-        btn.addEventListener("click", () => triggerPulse(btn.dataset.servoToggle, btn));
-      });
-
-      document.querySelectorAll("input[data-motor]").forEach((input) => {
-        input.min = -MAX_MOTOR_PWM;
-        input.max = MAX_MOTOR_PWM;
-        const output = input.nextElementSibling;
-        input.addEventListener("input", () => {
-          output.textContent = input.value;
-          const value = Number(input.value);
-          sendCommand({
-            type: "motor",
-            side: input.dataset.motor,
-            dir: value >= 0 ? 1 : 0,
-            pwm: Math.abs(value),
-          });
-        });
-      });
-
-      const speedSlider = document.getElementById("speedSlider");
-      speedSlider.min = 0;
-      speedSlider.max = MAX_MOTOR_PWM;
-      speedSlider.addEventListener("input", () => {
-        driveSpeed = Number(speedSlider.value);
-        document.getElementById("speedOutput").textContent = driveSpeed;
-      });
-
-      document.getElementById("stopBtn").addEventListener("click", stopDrive);
-    }
-
-    // While a key is physically held, the browser keeps firing keydown
-    // with repeat=true — so merely deleting WASD from heldKeys here isn't
-    // enough, the very next repeat event would just re-add it and the
-    // drive would silently resume. driveLocked instead blocks drive
-    // output outright until every drive key has been actually released
-    // (a real keyup, which repeat events don't produce).
-    let driveLocked = false;
-    const DRIVE_KEYS = ["KeyW", "KeyA", "KeyS", "KeyD"];
-
-    function stopDrive() {
-      driveLocked = true;
-      setMotor("l", 0);
-      setMotor("r", 0);
-    }
-
-    // ---- Keyboard control ---------------------------------------------
-    // Arrow keys: pan/tilt (held = continuous). I/O: zoom (held =
-    // continuous). F/L: momentary fire/load pulse, not latching — a
-    // second press while the pulse is mid-flight does nothing (ignores
-    // key-repeat) until it's released. W A S D: tank-steer drive, mixed
-    // from whichever of the four are currently held, scaled by the Speed
-    // slider. Escape: immediate stop (same as the All stop button) —
-    // safe to preventDefault outside of fullscreen; browsers force
-    // Escape to exit fullscreen regardless, if this page is ever shown
-    // that way.
-
-    let driveSpeed = 150;
-    const heldKeys = new Set();
-    const CONTINUOUS_KEYS = new Set([
-      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
-      "KeyI", "KeyO", "KeyW", "KeyA", "KeyS", "KeyD",
-    ]);
-
-    window.addEventListener("keydown", (event) => {
-      if (CONTINUOUS_KEYS.has(event.code)) {
-        event.preventDefault();
-        heldKeys.add(event.code);
-      } else if (event.code === "KeyF" && !event.repeat) {
-        event.preventDefault();
-        triggerPulse("fire", document.getElementById("fireBtn"));
-      } else if (event.code === "KeyL" && !event.repeat) {
-        event.preventDefault();
-        triggerPulse("load", document.getElementById("loadBtn"));
-      } else if (event.code === "Escape" && !event.repeat) {
-        event.preventDefault();
-        stopDrive();
-      }
-    });
-
-    window.addEventListener("keyup", (event) => {
-      if (CONTINUOUS_KEYS.has(event.code)) {
-        event.preventDefault();
-        heldKeys.delete(event.code);
-        if (driveLocked && !DRIVE_KEYS.some((k) => heldKeys.has(k))) {
-          driveLocked = false;
-        }
-      }
-    });
-
-    // Loses key state if focus leaves the page (e.g. alt-tab) while a
-    // key is physically still down — otherwise it'd keep "driving".
-    window.addEventListener("blur", () => { heldKeys.clear(); driveLocked = false; });
-
-    let driveWasActive = false;
-
-    function keyboardTick() {
-      if (heldKeys.has("ArrowLeft") || heldKeys.has("ArrowRight")) {
-        const delta = (heldKeys.has("ArrowRight") ? 1 : 0) - (heldKeys.has("ArrowLeft") ? 1 : 0);
-        setServo("pan", Number(servoSliderEl("pan").value) + delta * PAN_TILT_STEP_DEG);
-      }
-      if (heldKeys.has("ArrowUp") || heldKeys.has("ArrowDown")) {
-        const delta = (heldKeys.has("ArrowUp") ? 1 : 0) - (heldKeys.has("ArrowDown") ? 1 : 0);
-        setServo("tilt", Number(servoSliderEl("tilt").value) + delta * PAN_TILT_STEP_DEG);
-      }
-      if (heldKeys.has("KeyI") || heldKeys.has("KeyO")) {
-        const delta = (heldKeys.has("KeyI") ? 1 : 0) - (heldKeys.has("KeyO") ? 1 : 0);
-        setServo("zoom", Number(servoSliderEl("zoom").value) + delta * ZOOM_STEP_DEG);
-      }
-
-      const forward = driveLocked ? 0 : (heldKeys.has("KeyW") ? 1 : 0) - (heldKeys.has("KeyS") ? 1 : 0);
-      const turn = driveLocked ? 0 : (heldKeys.has("KeyD") ? 1 : 0) - (heldKeys.has("KeyA") ? 1 : 0);
-      const driveActive = forward !== 0 || turn !== 0;
-      if (driveActive || driveWasActive) {
-        const left = Math.max(-1, Math.min(1, forward + turn));
-        const right = Math.max(-1, Math.min(1, forward - turn));
-        setMotor("l", left * driveSpeed);
-        setMotor("r", right * driveSpeed);
-      }
-      driveWasActive = driveActive;
-    }
-
     startVideo();
-    startControlSocket();
-    wireControls();
+    startTelemetrySocket();
     requestAnimationFrame(render);
-    setInterval(keyboardTick, KEY_TICK_MS);
-
-    // Keeps the ESP32's deadman timeout from tripping while a motor is
-    // deliberately held at a non-zero speed and no slider is moving.
-    setInterval(() => sendCommand({ type: "ping" }), HEARTBEAT_INTERVAL_MS);
   </script>
 </body>
 </html>

@@ -1,0 +1,29 @@
+# PLACEHOLDER -- NOT REAL PIN ASSIGNMENTS. See
+# fpga/vehicle/constraints/alchitry_cu_v2_vehicle.pcf's header comment --
+# the same caveat applies here.
+#
+# set_io clk100mhz    <real pin>
+# set_io rst_n        <real pin>
+# set_io lora_aux     <real pin>
+# set_io lora_m0      <real pin>
+# set_io lora_m1      <real pin>
+# set_io lora_uart_tx <real pin>
+# set_io lora_uart_rx <real pin>
+#
+# MCP3008 SPI ADC (via the Br breakout board) -- 5 pots: pan, tilt,
+# zoom, throttle, turn (channels 0-4, see operator_input_capture.v).
+# set_io adc_sclk     <real pin>
+# set_io adc_mosi     <real pin>
+# set_io adc_miso     <real pin>
+# set_io adc_cs       <real pin>
+#
+# 2 pushbuttons (fire/load) -- see operator_input_capture.v's header
+# comment for the control mapping. Wiring assumed: each button between
+# the pin and GND, using the iCE40's own internal pull-up (icestorm's
+# pcf syntax for that is `set_io -pullup yes <signal> <pin>`) so
+# ACTIVE_LOW=1 (operator_input_capture.v's default) is correct with no
+# external resistor needed -- UNVERIFIED, confirm nextpnr-ice40/icepack
+# actually honor `-pullup yes` for this exact part before wiring buttons
+# without external pull-ups on real hardware.
+# set_io -pullup yes btn_fire         <real pin>
+# set_io -pullup yes btn_load         <real pin>
