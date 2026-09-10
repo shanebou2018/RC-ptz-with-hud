@@ -1,6 +1,6 @@
 // Top-level for the vehicle-side Alchitry Cu V2: receives commands over
 // the E220 LoRa link, drives 6 servos + 2 drive motors, polls a compass
-// over I2C, and feeds telemetry back to the Pi over a separate UART.
+// over SPI, and feeds telemetry back to the Pi over a separate UART.
 // This is the vehicle FPGA's full authority -- it never receives control
 // input from the Pi (see CLAUDE.md's fork section).
 //
@@ -18,7 +18,7 @@
 `include "servo_pwm.v"
 `include "motor_pwm.v"
 `include "fire_load_pulse.v"
-`include "i2c_master.v"
+`include "spi_compass_driver.v"
 `include "telemetry_uart_tx.v"
 
 module top_vehicle #(
@@ -48,9 +48,11 @@ module top_vehicle #(
   output wire motor_r_dir_pin,
   output wire motor_r_pwm_pin,
 
-  // compass/IMU (BNO055 placeholder, per CLAUDE.md)
-  output wire i2c_scl,
-  inout  wire i2c_sda,
+  // compass/IMU (BNO055 placeholder, per CLAUDE.md), SPI
+  output wire compass_sclk,
+  output wire compass_mosi,
+  input  wire compass_miso,
+  output wire compass_cs,
 
   // telemetry-only link to the Pi
   output wire pi_uart_tx
@@ -126,43 +128,45 @@ module top_vehicle #(
   wire [7:0] motor_l_pwm_actual = safe_stop ? 8'd0 : cmd_motor_l_pwm;
   wire [7:0] motor_r_pwm_actual = safe_stop ? 8'd0 : cmd_motor_r_pwm;
 
-  // ---- compass poll: periodic fixed transaction (see i2c_master.v) ----
-  // Poll period intentionally well longer than one I2C transaction takes
-  // at 100kHz (a handful of bytes, well under 1ms) so a new poll never
-  // starts while the previous one is still in flight -- no explicit busy
-  // interlock needed at these defaults, but this assumption would need
-  // revisiting if HEADING_POLL_MS were ever made much smaller.
+  // ---- compass poll: periodic fixed transaction (see spi_compass_driver.v) ----
+  // Poll period intentionally well longer than one SPI transaction takes
+  // (3 bytes, microseconds) so a new poll never starts while the
+  // previous one is still in flight -- no explicit busy interlock needed
+  // at these defaults, but this assumption would need revisiting if
+  // HEADING_POLL_MS were ever made much smaller.
   localparam HEADING_POLL_MS = 100;
   localparam integer HEADING_POLL_TICKS = (CLK_FREQ_HZ / 1000) * HEADING_POLL_MS;
   reg [$clog2(HEADING_POLL_TICKS + 1)-1:0] poll_cnt;
-  reg i2c_start;
+  reg compass_start;
   reg [15:0] heading_x10_reg;
-  wire i2c_done, i2c_nack;
-  wire [15:0] i2c_read_data;
+  wire compass_done;
+  wire [15:0] compass_read_data;
 
   always @(posedge clk) begin
-    i2c_start <= 1'b0;
+    compass_start <= 1'b0;
     if (rst) begin
       poll_cnt        <= 0;
       heading_x10_reg <= 16'd0;
     end else begin
       if (poll_cnt >= HEADING_POLL_TICKS - 1) begin
-        poll_cnt  <= 0;
-        i2c_start <= 1'b1;
+        poll_cnt      <= 0;
+        compass_start <= 1'b1;
       end else poll_cnt <= poll_cnt + 1'b1;
 
-      if (i2c_done && !i2c_nack)
+      if (compass_done)
         // BNO055 Euler heading register: 1 degree = 16 LSB (datasheet) ->
-        // degrees*10 = raw*10/16. Swap this conversion for whatever the
-        // real chosen compass part's register format turns out to be.
-        heading_x10_reg <= (i2c_read_data * 10) >> 4;
+        // degrees*10 = raw*10/16 -- already a multiply+shift, not a real
+        // divide (see fpga/README.md's LUT-budget finding on why that
+        // matters). Swap this conversion for whatever the real chosen
+        // compass part's register format turns out to be.
+        heading_x10_reg <= (compass_read_data * 10) >> 4;
     end
   end
 
-  i2c_master #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) compass (
-    .clk(clk), .rst(rst), .scl(i2c_scl), .sda(i2c_sda),
-    .start(i2c_start), .dev_addr(7'h28), .reg_addr(8'h1A), // BNO055 default addr, EUL_Heading_LSB
-    .read_data(i2c_read_data), .done(i2c_done), .nack_error(i2c_nack)
+  spi_compass_driver #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) compass (
+    .clk(clk), .rst(rst),
+    .sclk(compass_sclk), .mosi(compass_mosi), .miso(compass_miso), .cs(compass_cs),
+    .start(compass_start), .read_data(compass_read_data), .done(compass_done)
   );
 
   // ---- telemetry to the Pi ----

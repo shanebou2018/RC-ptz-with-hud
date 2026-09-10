@@ -1,49 +1,50 @@
-// Reads 12 physical pushbuttons (via the Br breakout board) and turns
-// them into the same command fields packet_encoder.v expects -- this
-// replaces top_base.v's earlier fixed-value stub, resolving the fork's
-// open question on what operator input device to use.
+// Reads the base station's operator input and turns it into the command
+// fields packet_encoder.v expects. Hybrid input, per user direction:
+// - pan, tilt, zoom, throttle, turn: 5 potentiometers via mcp3008_adc.v
+//   (SPI ADC) -- continuous, not increment-while-held like the original
+//   button-only design this replaced.
+// - fire, load: 2 physical pushbuttons (a pot doesn't make sense for a
+//   momentary trigger), debounced via button_debounce.v.
 //
-// Mapping mirrors the original (now-removed) browser HUD's keyboard
-// scheme 1:1, just on physical buttons instead of a keyboard:
-//   pan left/right, tilt up/down, zoom in/out  -- increment while held
-//     (STEP_DEG per STEP_TICK_MS, matching the old PAN_TILT_STEP_DEG/
-//     ZOOM_STEP_DEG/KEY_TICK_MS constants), clamped 0-180
-//   fire, load                                  -- momentary, edge-triggered
-//   drive fwd/rev/left/right                     -- 4-button tank-steer
-//     mix at a single fixed DRIVE_PWM speed (no analog throttle since
-//     these are on/off buttons, not a stick)
+// Fire/load semantics unchanged from the button-only design: a press
+// latches a "pending" flag, presented on op_fire/op_load and cleared the
+// moment it's included in a transmitted packet (`send_pulse`, from
+// top_base.v's send timer) -- packet_decoder.v assumes the base station
+// only ever sets the fire/load flag bit for the ONE packet meant to
+// trigger a pulse, not held across multiple packets.
+//
+// ADC channel mapping (fixed, matches mcp3008_adc.v's NUM_CHANNELS=5):
+//   0=pan, 1=tilt, 2=zoom (absolute position pots, 0-180 range)
+//   3=throttle, 4=turn (centered pots, tank-steer mixed like the old
+//     4-button drive scheme, but now continuous instead of on/off)
+//
+// All ADC-to-degrees/PWM scaling uses multiply-then-shift, never a real
+// divide -- see fpga/README.md's LUT-budget finding on why that matters
+// (division-heavy servo_pwm.v/motor_pwm.v ate 91% of the vehicle FPGA's
+// LUTs; this module was written to not repeat that mistake).
 `include "button_debounce.v"
-//
-// Fire/load semantics: packet_decoder.v's header comment documents the
-// assumption that the base station only ever sets the fire/load flag bit
-// for the ONE packet meant to trigger a pulse, not held across multiple
-// packets. This module honors that: a button press latches a "pending"
-// flag, which is presented on op_fire/op_load and cleared the moment
-// it's included in a transmitted packet (the `send_pulse` input, wired
-// to top_base.v's own send timer) -- so a single press produces fire=1
-// on exactly one outgoing packet, however long the button stays held.
+`include "packet_defs.vh"
+
 module operator_input_capture #(
-  parameter CLK_FREQ_HZ  = 100_000_000, // see servo_pwm.v's header note (fpga/vehicle/rtl) on this being unverified
-  parameter DEBOUNCE_MS  = 10,
-  parameter STEP_TICK_MS = 50,  // matches the old browser HUD's KEY_TICK_MS
-  parameter STEP_DEG     = 2,   // matches PAN_TILT_STEP_DEG/ZOOM_STEP_DEG
-  parameter [7:0] DRIVE_PWM = 8'd150, // fixed drive speed while a direction button is held; tune against MAX_MOTOR_PWM (packet_defs.vh)
-  parameter ACTIVE_LOW   = 1
+  parameter CLK_FREQ_HZ = 100_000_000, // see servo_pwm.v's header note (fpga/vehicle/rtl) on this being unverified
+  parameter DEBOUNCE_MS = 10,
+  parameter ACTIVE_LOW  = 1,
+  parameter DEADZONE    = 11'd20 // +/- raw ADC counts around center (512) treated as zero throttle/turn
 )(
   input  wire clk,
   input  wire rst,
   input  wire send_pulse, // from top_base.v's send timer -- consumes one pending fire/load trigger
 
-  input  wire btn_pan_left,   input wire btn_pan_right,
-  input  wire btn_tilt_up,    input wire btn_tilt_down,
-  input  wire btn_zoom_in,    input wire btn_zoom_out,
-  input  wire btn_fire,       input wire btn_load,
-  input  wire btn_drive_fwd,  input wire btn_drive_rev,
-  input  wire btn_drive_left, input wire btn_drive_right,
+  // from mcp3008_adc.v: channel i at bits [10*i +: 10]
+  input  wire [49:0] adc_channel_values,
+  input  wire         adc_new_data, // pulse: adc_channel_values just refreshed -- this module updates on this pulse
+
+  input  wire btn_fire,
+  input  wire btn_load,
 
   output reg [7:0] op_pan,
   output reg [7:0] op_tilt,
-  output reg [7:0] op_focus,  // no focus buttons (the old browser HUD had none either) -- stays fixed
+  output reg [7:0] op_focus,  // no focus pot (the old browser HUD had no focus control either) -- stays fixed
   output reg [7:0] op_zoom,
   output reg        op_fire,
   output reg        op_load,
@@ -52,64 +53,46 @@ module operator_input_capture #(
   output reg [7:0]  op_motor_l_pwm,
   output reg [7:0]  op_motor_r_pwm
 );
-  wire db_pan_left, db_pan_right, db_tilt_up, db_tilt_down, db_zoom_in, db_zoom_out;
-  wire db_fire, db_load, db_fwd, db_rev, db_left, db_right;
+  wire [9:0] adc_pan      = adc_channel_values[10*0 +: 10];
+  wire [9:0] adc_tilt     = adc_channel_values[10*1 +: 10];
+  wire [9:0] adc_zoom     = adc_channel_values[10*2 +: 10];
+  wire [9:0] adc_throttle = adc_channel_values[10*3 +: 10];
+  wire [9:0] adc_turn     = adc_channel_values[10*4 +: 10];
 
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d0 (.clk(clk), .rst(rst), .raw(btn_pan_left),    .pressed(db_pan_left));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d1 (.clk(clk), .rst(rst), .raw(btn_pan_right),   .pressed(db_pan_right));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d2 (.clk(clk), .rst(rst), .raw(btn_tilt_up),     .pressed(db_tilt_up));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d3 (.clk(clk), .rst(rst), .raw(btn_tilt_down),   .pressed(db_tilt_down));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d4 (.clk(clk), .rst(rst), .raw(btn_zoom_in),     .pressed(db_zoom_in));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d5 (.clk(clk), .rst(rst), .raw(btn_zoom_out),    .pressed(db_zoom_out));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d6 (.clk(clk), .rst(rst), .raw(btn_fire),        .pressed(db_fire));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d7 (.clk(clk), .rst(rst), .raw(btn_load),        .pressed(db_load));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d8 (.clk(clk), .rst(rst), .raw(btn_drive_fwd),   .pressed(db_fwd));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d9 (.clk(clk), .rst(rst), .raw(btn_drive_rev),   .pressed(db_rev));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d10(.clk(clk), .rst(rst), .raw(btn_drive_left),  .pressed(db_left));
-  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d11(.clk(clk), .rst(rst), .raw(btn_drive_right), .pressed(db_right));
-
-  // ---- pan/tilt/zoom: increment while held, ticked periodically ----
-  localparam integer STEP_TICKS = (CLK_FREQ_HZ / 1000) * STEP_TICK_MS;
-  reg [$clog2(STEP_TICKS + 1)-1:0] step_cnt;
-  reg step_tick;
-
-  always @(posedge clk) begin
-    step_tick <= 1'b0;
-    if (rst) begin
-      step_cnt <= 0;
-    end else if (step_cnt >= STEP_TICKS - 1) begin
-      step_cnt  <= 0;
-      step_tick <= 1'b1;
-    end else begin
-      step_cnt <= step_cnt + 1'b1;
-    end
-  end
-
-  function [7:0] clamp180(input signed [9:0] v);
-    begin
-      if (v < 0) clamp180 = 8'd0;
-      else if (v > 180) clamp180 = 8'd180;
-      else clamp180 = v[7:0];
-    end
-  endfunction
-
+  // ---- pan/tilt/zoom: absolute position, (raw*180)>>10 -- tops out at
+  // 179 rather than a full 180 due to the shift approximation (1023*180
+  // = 184140, >>10 = 179), an inconsequential rounding cost for a hobby
+  // pot's usable range, traded for avoiding a real division. Computed
+  // into explicit 18-bit intermediates (18 bits comfortably holds
+  // 1023*180=184140) BEFORE truncating to the 8-bit outputs -- letting
+  // Verilog infer the multiply's width from the 8-bit op_pan/op_tilt/
+  // op_zoom assignment targets would silently truncate adc_pan/adc_tilt/
+  // adc_zoom to 8 bits before the multiply even happens (512 truncates
+  // to 0 in 8 bits), corrupting the result. Found via simulation, not
+  // guessed -- see the equivalent, correctly-explicit-width pattern
+  // already used below for throttle/turn. ----
+  reg [17:0] pan_scaled, tilt_scaled, zoom_scaled;
   always @(posedge clk) begin
     if (rst) begin
       op_pan   <= 8'd90;
       op_tilt  <= 8'd90;
       op_focus <= 8'd0;
       op_zoom  <= 8'd0;
-    end else if (step_tick) begin
-      if (db_pan_left ^ db_pan_right)
-        op_pan <= clamp180($signed({2'b0, op_pan}) + (db_pan_right ? STEP_DEG : -STEP_DEG));
-      if (db_tilt_up ^ db_tilt_down)
-        op_tilt <= clamp180($signed({2'b0, op_tilt}) + (db_tilt_up ? STEP_DEG : -STEP_DEG));
-      if (db_zoom_in ^ db_zoom_out)
-        op_zoom <= clamp180($signed({2'b0, op_zoom}) + (db_zoom_in ? STEP_DEG : -STEP_DEG));
+    end else if (adc_new_data) begin
+      pan_scaled  = adc_pan  * 18'd180;
+      tilt_scaled = adc_tilt * 18'd180;
+      zoom_scaled = adc_zoom * 18'd180;
+      op_pan  <= pan_scaled[17:10];
+      op_tilt <= tilt_scaled[17:10];
+      op_zoom <= zoom_scaled[17:10];
     end
   end
 
   // ---- fire/load: momentary, latched-until-next-transmitted-packet ----
+  wire db_fire, db_load;
+  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d0 (.clk(clk), .rst(rst), .raw(btn_fire), .pressed(db_fire));
+  button_debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .ACTIVE_LOW(ACTIVE_LOW)) d1 (.clk(clk), .rst(rst), .raw(btn_load), .pressed(db_load));
+
   reg db_fire_prev, db_load_prev;
   reg fire_pending, load_pending;
 
@@ -133,30 +116,55 @@ module operator_input_capture #(
     op_load <= load_pending;
   end
 
-  // ---- drive: 4-button tank-steer mix at a fixed speed ----
-  reg signed [2:0] forward, turn, left, right;
+  // ---- drive: throttle/turn pots, tank-steer mixed, continuous ----
+  // Centered at raw=512 (a standard analog joystick's spring-centered
+  // rest position); DEADZONE suppresses drift/noise near center so the
+  // vehicle doesn't creep with the stick released. Scaled to
+  // +/-MAX_MOTOR_PWM via multiply+shift (centered range is +/-512 = 2^9).
+  reg signed [10:0] throttle_c, turn_c;
+  reg signed [19:0] fwd_scaled, turn_scaled;
+  reg signed [10:0] fwd_pwm, turn_pwm;
+  reg signed [10:0] left_raw, right_raw;
+  reg signed [10:0] left_abs, right_abs;
+
   always @(posedge clk) begin
     if (rst) begin
       op_motor_l_dir <= 1'b1;
       op_motor_r_dir <= 1'b1;
       op_motor_l_pwm <= 8'd0;
       op_motor_r_pwm <= 8'd0;
-    end else begin
-      forward = (db_fwd && !db_rev) ? 3'sd1 : (db_rev && !db_fwd) ? -3'sd1 : 3'sd0;
-      turn    = (db_right && !db_left) ? 3'sd1 : (db_left && !db_right) ? -3'sd1 : 3'sd0;
+    end else if (adc_new_data) begin
+      throttle_c = $signed({1'b0, adc_throttle}) - 11'sd512;
+      turn_c     = $signed({1'b0, adc_turn})     - 11'sd512;
 
-      left  = forward + turn;
-      if (left > 3'sd1) left = 3'sd1;
-      if (left < -3'sd1) left = -3'sd1;
+      if (throttle_c > -$signed(DEADZONE) && throttle_c < $signed(DEADZONE)) throttle_c = 11'sd0;
+      if (turn_c     > -$signed(DEADZONE) && turn_c     < $signed(DEADZONE)) turn_c     = 11'sd0;
 
-      right = forward - turn;
-      if (right > 3'sd1) right = 3'sd1;
-      if (right < -3'sd1) right = -3'sd1;
+      fwd_scaled  = throttle_c * $signed({3'b0, `MAX_MOTOR_PWM});
+      turn_scaled = turn_c     * $signed({3'b0, `MAX_MOTOR_PWM});
+      fwd_pwm     = fwd_scaled  >>> 9;
+      turn_pwm    = turn_scaled >>> 9;
 
-      op_motor_l_dir <= (left >= 0);
-      op_motor_l_pwm <= (left == 0) ? 8'd0 : DRIVE_PWM;
-      op_motor_r_dir <= (right >= 0);
-      op_motor_r_pwm <= (right == 0) ? 8'd0 : DRIVE_PWM;
+      left_raw  = fwd_pwm + turn_pwm;
+      right_raw = fwd_pwm - turn_pwm;
+
+      if (left_raw > $signed({3'b0, `MAX_MOTOR_PWM})) left_raw = $signed({3'b0, `MAX_MOTOR_PWM});
+      if (left_raw < -$signed({3'b0, `MAX_MOTOR_PWM})) left_raw = -$signed({3'b0, `MAX_MOTOR_PWM});
+      if (right_raw > $signed({3'b0, `MAX_MOTOR_PWM})) right_raw = $signed({3'b0, `MAX_MOTOR_PWM});
+      if (right_raw < -$signed({3'b0, `MAX_MOTOR_PWM})) right_raw = -$signed({3'b0, `MAX_MOTOR_PWM});
+
+      // Negate (as a signed value) before truncating to 8 bits, not
+      // after -- truncating a negative signed value's low bits first
+      // gives its two's-complement bit pattern, not its magnitude.
+      // Safe to truncate post-negation since magnitude is already
+      // clamped to <= MAX_MOTOR_PWM (200), which fits in 8 bits.
+      left_abs  = left_raw  < 0 ? -left_raw  : left_raw;
+      right_abs = right_raw < 0 ? -right_raw : right_raw;
+
+      op_motor_l_dir <= (left_raw >= 0);
+      op_motor_l_pwm <= left_abs[7:0];
+      op_motor_r_dir <= (right_raw >= 0);
+      op_motor_r_pwm <= right_abs[7:0];
     end
   end
 endmodule

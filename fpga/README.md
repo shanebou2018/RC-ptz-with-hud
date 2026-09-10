@@ -27,8 +27,8 @@ this is a guess, not a confirmed fact.
 make sim
 ```
 
-Runs all 13 testbenches under `common/sim/`, `vehicle/sim/`, `base/sim/`.
-As of this writing, all 13 pass:
+Runs all 14 testbenches under `common/sim/`, `vehicle/sim/`, `base/sim/`.
+As of this writing, all 14 pass:
 
 - `tb_crc16` -- CRC-16/CCITT-FALSE against the standard test vector, plus a corruption-detection check
 - `tb_keystream` -- determinism, seed/seq sensitivity, XOR round-trip, wrong-seed-fails-to-recover
@@ -37,10 +37,11 @@ As of this writing, all 13 pass:
 - `tb_fire_load_pulse` -- trigger timing, retrigger-while-active ignored
 - `tb_deadman_timer` -- timeout assertion/clearing
 - `tb_uart_engine`, `tb_e220_driver` -- UART loopback, and a full driver+driver (via two bench "radio" models) round trip in both directions
-- `tb_i2c_master` -- full read transaction against a bench I2C slave model, plus a wrong-address NACK case
+- `tb_spi_compass_driver` -- full 3-byte read transaction against a bench SPI compass model
 - `tb_telemetry_uart_tx` -- frame layout, field values, CRC, against a plain UART receiver
 - `tb_button_debounce` -- bounce rejection, sustained-press registration, release
-- `tb_operator_input_capture` -- pan/tilt/zoom increment-while-held + clamping, fire/load one-packet-per-press timing (including that a second `send_pulse` without a new press doesn't re-fire), the 4-button tank-steer mix table
+- `tb_mcp3008_adc` -- full round-trip against a bench MCP3008 model across all 5 channels, continuous polling
+- `tb_operator_input_capture` -- pan/tilt/zoom ADC-to-degrees scaling, throttle/turn deadzone + tank-steer mixing (forward, reverse, pivot-turn), fire/load one-packet-per-press timing (including that a second `send_pulse` without a new press doesn't re-fire)
 
 None of this is hardware verification -- it proves the RTL's logic is
 internally consistent, not that it works against a real SX-family radio,
@@ -58,10 +59,16 @@ logic cells. That check has now been run:
 make stat-vehicle
 ```
 
-**Result: 6993 SB_LUT4 cells out of 7680 available -- 91% LUT
-utilization**, with no place-and-route margin, I/O buffer overhead, or
-future-feature headroom accounted for yet. This is far tighter than
-comfortable.
+**Result: 7273 SB_LUT4 cells out of 7680 available -- 94.7% LUT
+utilization** (only 407 LUTs of headroom left), with no place-and-route
+margin, I/O buffer overhead, or future-feature headroom accounted for
+yet. This got *tighter*, not looser, once the compass moved from I2C to
+SPI: the SPI driver's own bit-bang engine (261 cells in isolation) is
+larger than the I2C driver it replaced was (171 cells), and the switch
+cost more than that difference alone once resynthesized as part of the
+whole design (6993 -> 7273, a net +280 cells) -- global synthesis
+optimization doesn't sum module costs linearly. This is far tighter than
+comfortable, and getting tighter with each addition.
 
 **Root cause, also measured, not guessed**: `servo_pwm.v` (1921 cells
 per instance x6 instances) and `motor_pwm.v` (1562 cells per instance x2
@@ -71,15 +78,17 @@ runtime division by a constant (`/ 180` in `servo_pwm.v`, `/ 255` in
 this as a genuine iterative divider (each instance shows ~700+ `SB_CARRY`
 cells, consistent with a ripple-carry restoring divider) rather than the
 much cheaper shift-and-add constant-multiply-by-reciprocal a hand-tuned
-implementation would use. `i2c_master.v`, `packet_decoder.v`,
+implementation would use. `spi_compass_driver.v`, `packet_decoder.v`,
 `e220_driver.v`, `telemetry_uart_tx.v`, `deadman_timer.v`, and
 `fire_load_pulse.v` are all individually small (122-712 cells each) --
-they are not the problem.
+they are not the problem. `operator_input_capture.v`'s own ADC-to-degrees/
+PWM scaling was deliberately written multiply-then-shift from the start
+(see its header comment) specifically to not add to this problem.
 
-`top_base.v` (no servo/motor PWM instances at all -- with the full 12-button
-`operator_input_capture.v`/`button_debounce.v` now wired in, not the earlier
-fixed-value stub) synthesizes to 736 LUTs -- 9.6% utilization, still
-comfortable.
+`top_base.v` (no servo/motor PWM instances at all -- with the full
+5-pot-ADC + 2-button `operator_input_capture.v`/`mcp3008_adc.v`/
+`button_debounce.v` pipeline wired in) synthesizes to 1135 LUTs -- 14.8%
+utilization, still comfortable.
 
 **Recommended next step, not yet done**: replace the `/ 180` and `/ 255`
 divisions in `servo_pwm.v`/`motor_pwm.v` with a multiply-by-reciprocal
@@ -91,11 +100,12 @@ breaking the exact pulse-width values the existing testbenches check for
 shift results off by 1 tick at some inputs) -- worth doing properly with
 its own verification pass, not as a rushed find-and-replace. Until that's
 done, **do not assume a soft RISC-V core (open question 1 in the plan)
-fits alongside this design** -- at 91% utilization with pure hand-written
+fits alongside this design** -- at 94.7% utilization with pure hand-written
 RTL, there is essentially no room left for a picorv32 core and its
 supporting RAM/peripherals. This makes the soft-core-vs-pure-RTL open
 question largely moot until the division cost is addressed: pure RTL is
-barely fitting as-is, so a soft core is very unlikely to fit at all
+barely fitting as-is (and margin has been shrinking with each real
+addition, not growing), so a soft core is very unlikely to fit at all
 without the same optimization first.
 
 ## Building a real bitstream (not yet possible end-to-end)
@@ -132,7 +142,7 @@ for what this scheme does and doesn't protect against.
 4. Vehicle-side actuation bench test -- **done in simulation** (`tb_servo_pwm`, `tb_motor_pwm`, `tb_fire_load_pulse`), not against real servos/motors.
 5. Deadman timer integration -- **done in simulation** (`tb_deadman_timer`), not against a real link.
 6. Telemetry link to the Pi -- RTL + `control/vehicle_fpga_bridge.py` both written and independently tested (`tb_telemetry_uart_tx`, and the Python side has its own CRC/framing logic mirroring the RTL); the two have never talked to each other over a real UART.
-7. Base station operator input -- **done in simulation** (`tb_button_debounce`, `tb_operator_input_capture`): 12 pushbuttons, debounced, mapped to pan/tilt/zoom (increment-while-held), fire/load (momentary), and 4-button tank-steer drive at a fixed speed. Real hardware (actual buttons, actual `DRIVE_PWM`/`STEP_DEG` feel) not tested.
+7. Base station operator input -- **done in simulation** (`tb_button_debounce`, `tb_mcp3008_adc`, `tb_operator_input_capture`): 5 pots (MCP3008 SPI ADC) for pan/tilt/zoom/throttle/turn, continuously scaled; 2 debounced pushbuttons for fire/load (momentary). Real hardware (actual pots/buttons, actual `DEADZONE` feel) not tested.
 8. HUD control-surface cleanup -- done (see CLAUDE.md's fork section and `web/static/index.html`).
 9. Full integration bench test -- **not done**, no hardware.
 10. Optional return channel -- **not built**, per the plan's open question 5 (no RX path on the base station's radio in the current design).

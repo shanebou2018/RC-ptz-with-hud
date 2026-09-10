@@ -160,7 +160,7 @@ won't show anything without MediaMTX + a real camera pipeline running.
 
 ```
 cd fpga
-make sim            # run all 13 testbenches (iverilog)
+make sim            # run all 14 testbenches (iverilog)
 make stat-vehicle    # yosys synth + LUT utilization report, no .pcf needed
 ```
 

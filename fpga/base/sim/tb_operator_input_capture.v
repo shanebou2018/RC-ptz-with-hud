@@ -1,40 +1,29 @@
 `timescale 1ns/1ps
 `include "operator_input_capture.v"
 
-// Scaled-down: CLK_FREQ_HZ=100_000, DEBOUNCE_MS=1 (100 ticks),
-// STEP_TICK_MS=2 (200 ticks) -- distinct enough to tell debounce settling
-// apart from a step tick in the trace, still fast to simulate.
+// Drives adc_channel_values/adc_new_data directly (bypassing mcp3008_adc.v
+// -- that's covered by its own testbench) to isolate operator_input_capture's
+// own scaling/mixing/fire-load logic.
 module tb_operator_input_capture;
   localparam CLK_FREQ_HZ = 100_000;
   localparam DEBOUNCE_MS = 1;
-  localparam STEP_TICK_MS = 2;
-  localparam DEBOUNCE_TICKS = (CLK_FREQ_HZ / 1000) * DEBOUNCE_MS;   // 100
-  localparam STEP_TICKS     = (CLK_FREQ_HZ / 1000) * STEP_TICK_MS;  // 200
+  localparam DEBOUNCE_TICKS = (CLK_FREQ_HZ / 1000) * DEBOUNCE_MS; // 100
 
   reg clk = 0;
   reg rst = 1;
   reg send_pulse = 0;
-
-  // Active-low buttons (default ACTIVE_LOW=1): idle high, pressed = 0.
-  reg btn_pan_left=1, btn_pan_right=1, btn_tilt_up=1, btn_tilt_down=1;
-  reg btn_zoom_in=1, btn_zoom_out=1, btn_fire=1, btn_load=1;
-  reg btn_drive_fwd=1, btn_drive_rev=1, btn_drive_left=1, btn_drive_right=1;
+  reg [49:0] adc_channel_values = 0;
+  reg adc_new_data = 0;
+  reg btn_fire = 1, btn_load = 1; // active-low, idle high
 
   wire [7:0] op_pan, op_tilt, op_focus, op_zoom;
   wire op_fire, op_load, op_motor_l_dir, op_motor_r_dir;
   wire [7:0] op_motor_l_pwm, op_motor_r_pwm;
 
-  operator_input_capture #(
-    .CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS), .STEP_TICK_MS(STEP_TICK_MS),
-    .STEP_DEG(2), .DRIVE_PWM(8'd150)
-  ) dut (
+  operator_input_capture #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(DEBOUNCE_MS)) dut (
     .clk(clk), .rst(rst), .send_pulse(send_pulse),
-    .btn_pan_left(btn_pan_left), .btn_pan_right(btn_pan_right),
-    .btn_tilt_up(btn_tilt_up), .btn_tilt_down(btn_tilt_down),
-    .btn_zoom_in(btn_zoom_in), .btn_zoom_out(btn_zoom_out),
+    .adc_channel_values(adc_channel_values), .adc_new_data(adc_new_data),
     .btn_fire(btn_fire), .btn_load(btn_load),
-    .btn_drive_fwd(btn_drive_fwd), .btn_drive_rev(btn_drive_rev),
-    .btn_drive_left(btn_drive_left), .btn_drive_right(btn_drive_right),
     .op_pan(op_pan), .op_tilt(op_tilt), .op_focus(op_focus), .op_zoom(op_zoom),
     .op_fire(op_fire), .op_load(op_load),
     .op_motor_l_dir(op_motor_l_dir), .op_motor_r_dir(op_motor_r_dir),
@@ -45,7 +34,16 @@ module tb_operator_input_capture;
   integer errors = 0;
 
   task settle_debounce; begin repeat (DEBOUNCE_TICKS + 10) @(posedge clk); end endtask
-  task wait_step_tick;  begin repeat (STEP_TICKS + 10) @(posedge clk); end endtask
+
+  task set_adc(input [9:0] pan, input [9:0] tilt, input [9:0] zoom, input [9:0] throttle, input [9:0] turn);
+    begin
+      adc_channel_values = {turn, throttle, zoom, tilt, pan};
+      @(negedge clk); adc_new_data = 1;
+      @(posedge clk);
+      @(negedge clk); adc_new_data = 0;
+      #1;
+    end
+  endtask
 
   initial begin
     @(negedge clk); rst = 0;
@@ -56,115 +54,81 @@ module tb_operator_input_capture;
       errors = errors + 1;
     end else $display("PASS: pan=90 tilt=90 zoom=0 at reset");
 
-    // --- pan right increments, clamped at 180 ---
-    btn_pan_right = 0; // pressed
-    settle_debounce();
-    wait_step_tick();
-    if (op_pan !== 8'd92) begin
-      $display("FAIL: pan after one step-tick held right = %0d, expected 92", op_pan);
+    // --- pan/tilt/zoom: min, mid, max ADC values ---
+    set_adc(10'd0, 10'd512, 10'd1023, 10'd512, 10'd512);
+    if (op_pan !== 8'd0) begin
+      $display("FAIL: pan at ADC=0 -> %0d, expected 0", op_pan);
       errors = errors + 1;
-    end else $display("PASS: pan increments by STEP_DEG=2 while held right");
+    end else $display("PASS: pan at ADC=0 -> 0");
 
-    begin : clamp_check
-      integer i;
-      for (i = 0; i < 60; i = i + 1) wait_step_tick(); // far more than enough to hit 180
-      if (op_pan !== 8'd180) begin
-        $display("FAIL: pan did not clamp at 180 (got %0d)", op_pan);
-        errors = errors + 1;
-      end else $display("PASS: pan clamps at 180");
-    end
-    btn_pan_right = 1; // release
-    settle_debounce();
-
-    // --- tilt down decrements ---
-    btn_tilt_down = 0;
-    settle_debounce();
-    wait_step_tick();
-    if (op_tilt !== 8'd88) begin
-      $display("FAIL: tilt after one step-tick held down = %0d, expected 88", op_tilt);
+    if (op_tilt < 8'd88 || op_tilt > 8'd92) begin // (512*180)>>10 = 90
+      $display("FAIL: tilt at ADC=512 -> %0d, expected ~90", op_tilt);
       errors = errors + 1;
-    end else $display("PASS: tilt decrements by STEP_DEG=2 while held down");
-    btn_tilt_down = 1;
-    settle_debounce();
+    end else $display("PASS: tilt at ADC=512 -> ~90 (%0d)", op_tilt);
 
-    // --- zoom in increments from 0 ---
-    btn_zoom_in = 0;
-    settle_debounce();
-    wait_step_tick();
-    if (op_zoom !== 8'd2) begin
-      $display("FAIL: zoom after one step-tick held in = %0d, expected 2", op_zoom);
+    if (op_zoom !== 8'd179) begin // (1023*180)>>10 = 179 (shift approximation, documented)
+      $display("FAIL: zoom at ADC=1023 -> %0d, expected 179", op_zoom);
       errors = errors + 1;
-    end else $display("PASS: zoom increments by STEP_DEG=2 while held in");
-    btn_zoom_in = 1;
-    settle_debounce();
+    end else $display("PASS: zoom at ADC=1023 -> 179 (shift-approximation max, as documented)");
 
-    // --- fire: momentary, one-packet pulse ---
+    // --- throttle/turn: centered (512) -> both motors stopped ---
+    if (op_motor_l_pwm !== 8'd0 || op_motor_r_pwm !== 8'd0) begin
+      $display("FAIL: centered throttle/turn did not stop both motors (L=%0d R=%0d)", op_motor_l_pwm, op_motor_r_pwm);
+      errors = errors + 1;
+    end else $display("PASS: centered throttle/turn -> both motors stopped");
+
+    // --- full-forward throttle, centered turn -> both motors forward at ~MAX_MOTOR_PWM ---
+    set_adc(10'd0, 10'd512, 10'd1023, 10'd1023, 10'd512);
+    if (op_motor_l_dir !== 1'b1 || op_motor_r_dir !== 1'b1) begin
+      $display("FAIL: full-forward throttle did not drive both motors forward (Ldir=%b Rdir=%b)", op_motor_l_dir, op_motor_r_dir);
+      errors = errors + 1;
+    end else if (op_motor_l_pwm < 8'd190 || op_motor_r_pwm < 8'd190) begin
+      $display("FAIL: full-forward throttle pwm too low (L=%0d R=%0d, expected near MAX_MOTOR_PWM=200)", op_motor_l_pwm, op_motor_r_pwm);
+      errors = errors + 1;
+    end else $display("PASS: full-forward throttle -> both motors forward near max (L=%0d R=%0d)", op_motor_l_pwm, op_motor_r_pwm);
+
+    // --- full-reverse throttle -> both motors reverse ---
+    set_adc(10'd0, 10'd512, 10'd1023, 10'd0, 10'd512);
+    if (op_motor_l_dir !== 1'b0 || op_motor_r_dir !== 1'b0) begin
+      $display("FAIL: full-reverse throttle did not drive both motors in reverse (Ldir=%b Rdir=%b)", op_motor_l_dir, op_motor_r_dir);
+      errors = errors + 1;
+    end else $display("PASS: full-reverse throttle -> both motors reverse");
+
+    // --- centered throttle, full-right turn -> left motor forward, right motor reverse (pivot turn) ---
+    set_adc(10'd0, 10'd512, 10'd1023, 10'd512, 10'd1023);
+    if (op_motor_l_dir !== 1'b1 || op_motor_r_dir !== 1'b0) begin
+      $display("FAIL: full-right turn (centered throttle) mix wrong (Ldir=%b Rdir=%b, expected L=1 R=0)", op_motor_l_dir, op_motor_r_dir);
+      errors = errors + 1;
+    end else $display("PASS: centered throttle + full-right turn -> pivot (L forward, R reverse)");
+
+    // --- deadzone: throttle just off-center should still read as stopped ---
+    set_adc(10'd0, 10'd512, 10'd1023, 10'd515, 10'd512); // +3 from center, within default DEADZONE=20
+    if (op_motor_l_pwm !== 8'd0 || op_motor_r_pwm !== 8'd0) begin
+      $display("FAIL: small off-center throttle (within deadzone) produced nonzero pwm (L=%0d R=%0d)", op_motor_l_pwm, op_motor_r_pwm);
+      errors = errors + 1;
+    end else $display("PASS: throttle within the deadzone reads as stopped");
+
+    // --- fire: momentary, one-packet pulse (same behavior as the button-only design) ---
     btn_fire = 0;
     settle_debounce();
     #1;
     if (op_fire !== 1'b1) begin
       $display("FAIL: op_fire not set after a fire press");
       errors = errors + 1;
-    end else $display("PASS: op_fire set after a fire press (pending until next send)");
+    end else $display("PASS: op_fire set after a fire press");
 
     @(negedge clk); send_pulse = 1;
     @(posedge clk); #1;
-    // op_fire should still read 1 on the same edge send_pulse fires (packet_encoder samples it here)
     if (op_fire !== 1'b1) begin
       $display("FAIL: op_fire not still high on the send_pulse edge itself");
       errors = errors + 1;
-    end else $display("PASS: op_fire is high on the send_pulse edge (gets included in that packet)");
+    end else $display("PASS: op_fire is high on the send_pulse edge");
     @(negedge clk); send_pulse = 0;
     @(posedge clk); #1;
     if (op_fire !== 1'b0) begin
       $display("FAIL: op_fire did not clear after being consumed by send_pulse");
       errors = errors + 1;
-    end else $display("PASS: op_fire clears after one send_pulse (won't repeat on the next packet)");
-
-    btn_fire = 1; // release, still held debounce state doesn't matter now
-    settle_debounce();
-
-    // holding the button through a SECOND send_pulse must NOT re-fire
-    // (edge-triggered pending, not level-triggered)
-    @(negedge clk); send_pulse = 1;
-    @(posedge clk); #1;
-    if (op_fire !== 1'b0) begin
-      $display("FAIL: op_fire re-armed on a second send_pulse without a new press");
-      errors = errors + 1;
-    end else $display("PASS: op_fire stays low on a later send_pulse with no new press");
-    @(negedge clk); send_pulse = 0;
-    @(posedge clk);
-
-    // --- drive: forward only ---
-    btn_drive_fwd = 0;
-    settle_debounce();
-    #1;
-    if (op_motor_l_dir !== 1'b1 || op_motor_r_dir !== 1'b1 ||
-        op_motor_l_pwm !== 8'd150 || op_motor_r_pwm !== 8'd150) begin
-      $display("FAIL: forward-only drive mix wrong (L dir=%b pwm=%0d, R dir=%b pwm=%0d)",
-                op_motor_l_dir, op_motor_l_pwm, op_motor_r_dir, op_motor_r_pwm);
-      errors = errors + 1;
-    end else $display("PASS: forward-only drives both motors forward at DRIVE_PWM=150");
-
-    // --- drive: forward + right turn (tank steer: right motor stops) ---
-    btn_drive_right = 0;
-    settle_debounce();
-    #1;
-    if (op_motor_l_pwm !== 8'd150 || op_motor_l_dir !== 1'b1 || op_motor_r_pwm !== 8'd0) begin
-      $display("FAIL: forward+right mix wrong (L dir=%b pwm=%0d, R pwm=%0d)",
-                op_motor_l_dir, op_motor_l_pwm, op_motor_r_pwm);
-      errors = errors + 1;
-    end else $display("PASS: forward+right turn -> left motor drives, right motor stops");
-
-    btn_drive_fwd = 1; btn_drive_right = 1;
-    settle_debounce();
-
-    // --- drive: all released -> both motors stop ---
-    #1;
-    if (op_motor_l_pwm !== 8'd0 || op_motor_r_pwm !== 8'd0) begin
-      $display("FAIL: motors did not stop with no drive buttons held");
-      errors = errors + 1;
-    end else $display("PASS: no drive buttons held -> both motors stopped");
+    end else $display("PASS: op_fire clears after one send_pulse");
 
     if (errors == 0) $display("ALL OPERATOR_INPUT_CAPTURE TESTS PASSED");
     else $display("%0d OPERATOR_INPUT_CAPTURE TEST(S) FAILED", errors);

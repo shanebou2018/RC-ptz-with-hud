@@ -25,6 +25,8 @@
 # set_io motor_l_pwm_pin <real pin>
 # set_io motor_r_dir_pin <real pin>
 # set_io motor_r_pwm_pin <real pin>
-# set_io i2c_scl     <real pin>
-# set_io i2c_sda     <real pin>
+# set_io compass_sclk <real pin>
+# set_io compass_mosi <real pin>
+# set_io compass_miso <real pin>
+# set_io compass_cs   <real pin>
 # set_io pi_uart_tx  <real pin>

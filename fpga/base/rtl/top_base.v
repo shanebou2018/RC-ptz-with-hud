@@ -1,12 +1,13 @@
 // Top-level for the base-station Alchitry Cu V2: reads operator input
-// (12 pushbuttons, via the Br breakout board -- see
-// operator_input_capture.v) and transmits commands over the E220 LoRa
-// link, at a steady rate (the same packet doubles as the heartbeat --
-// see packet_encoder.v).
+// (5 potentiometers via an MCP3008 SPI ADC for pan/tilt/zoom/throttle/
+// turn, plus 2 pushbuttons for fire/load -- see operator_input_capture.v)
+// and transmits commands over the E220 LoRa link, at a steady rate (the
+// same packet doubles as the heartbeat -- see packet_encoder.v).
 `include "packet_defs.vh"
 `include "e220_driver.v"
 `include "packet_encoder.v"
 `include "operator_input_capture.v"
+`include "mcp3008_adc.v"
 
 module top_base #(
   parameter CLK_FREQ_HZ = 100_000_000 // see servo_pwm.v's header note (in fpga/vehicle/rtl) on this being unverified
@@ -20,31 +21,39 @@ module top_base #(
   output wire lora_uart_tx,
   input  wire lora_uart_rx,
 
-  // 12 pushbuttons (via the Br breakout board) -- see
-  // operator_input_capture.v's header comment for the mapping.
-  input  wire btn_pan_left,   input wire btn_pan_right,
-  input  wire btn_tilt_up,    input wire btn_tilt_down,
-  input  wire btn_zoom_in,    input wire btn_zoom_out,
-  input  wire btn_fire,       input wire btn_load,
-  input  wire btn_drive_fwd,  input wire btn_drive_rev,
-  input  wire btn_drive_left, input wire btn_drive_right
+  // MCP3008 ADC (via the Br breakout board) -- 5 pots: pan, tilt, zoom,
+  // throttle, turn (channels 0-4, see operator_input_capture.v)
+  output wire adc_sclk,
+  output wire adc_mosi,
+  input  wire adc_miso,
+  output wire adc_cs,
+
+  // fire/load pushbuttons
+  input  wire btn_fire,
+  input  wire btn_load
 );
   wire clk = clk100mhz;
   wire rst = ~rst_n;
 
-  // ---- operator input: 12 buttons -> command fields ----
+  // ---- ADC: continuously polls all 5 channels ----
+  wire [49:0] adc_channel_values;
+  wire adc_new_data;
+
+  mcp3008_adc #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) adc (
+    .clk(clk), .rst(rst),
+    .sclk(adc_sclk), .mosi(adc_mosi), .miso(adc_miso), .cs(adc_cs),
+    .channel_values(adc_channel_values), .new_data(adc_new_data)
+  );
+
+  // ---- operator input: ADC pots + 2 buttons -> command fields ----
   wire [7:0] op_pan, op_tilt, op_focus, op_zoom;
   wire op_fire, op_load, op_motor_l_dir, op_motor_r_dir;
   wire [7:0] op_motor_l_pwm, op_motor_r_pwm;
 
   operator_input_capture #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) opin (
     .clk(clk), .rst(rst), .send_pulse(send_pulse),
-    .btn_pan_left(btn_pan_left), .btn_pan_right(btn_pan_right),
-    .btn_tilt_up(btn_tilt_up), .btn_tilt_down(btn_tilt_down),
-    .btn_zoom_in(btn_zoom_in), .btn_zoom_out(btn_zoom_out),
+    .adc_channel_values(adc_channel_values), .adc_new_data(adc_new_data),
     .btn_fire(btn_fire), .btn_load(btn_load),
-    .btn_drive_fwd(btn_drive_fwd), .btn_drive_rev(btn_drive_rev),
-    .btn_drive_left(btn_drive_left), .btn_drive_right(btn_drive_right),
     .op_pan(op_pan), .op_tilt(op_tilt), .op_focus(op_focus), .op_zoom(op_zoom),
     .op_fire(op_fire), .op_load(op_load),
     .op_motor_l_dir(op_motor_l_dir), .op_motor_r_dir(op_motor_r_dir),
