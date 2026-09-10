@@ -1,0 +1,15 @@
+# PLACEHOLDER -- NOT REAL PIN ASSIGNMENTS. See
+# fpga/vehicle/constraints/alchitry_cu_v2_vehicle.pcf's header comment --
+# the same caveat applies here.
+#
+# set_io clk100mhz    <real pin>
+# set_io rst_n        <real pin>
+# set_io lora_aux     <real pin>
+# set_io lora_m0      <real pin>
+# set_io lora_m1      <real pin>
+# set_io lora_uart_tx <real pin>
+# set_io lora_uart_rx <real pin>
+#
+# Plus whatever pins the eventual operator-input device needs --
+# top_base.v's operator_input is currently a fixed-value stub (see its
+# header comment), so there's nothing to constrain for it yet.

@@ -8,6 +8,8 @@ RC-ptz-with-hud: a Raspberry Pi 5 based pan/tilt/zoom (PTZ) camera rig with a li
 
 Status: **early scaffolding, moving toward a first bench test**. Current phase: one Pi 5, one camera, an ESP32 driving motors/servos/compass, and the HUD web page — proving out the pipeline end-to-end before the second camera and the full PIP layout get added. None of it has been run against real hardware yet. Treat everything here as the working plan, and correct it as real hardware testing reveals problems.
 
+**This branch (`lora-fpga-control`) is a fork that replaces the ESP32/USB-serial control architecture described below with a base-station-FPGA ↔ LoRa ↔ vehicle-FPGA link — see "Fork: LoRa/FPGA vehicle control architecture" right after "Goal" for the current, divergent architecture. Everything else in this file (video pipeline, HUD rendering, "Serial protocol (Pi ↔ ESP32)", "Motor safety") describes the sibling main-branch architecture and is kept here as reference/historical context, not as this branch's current design — the fork section below is authoritative for anything it covers.**
+
 ## Goal
 
 1. **Camera capture** on a Raspberry Pi 5. End goal is **dual camera** composited as picture-in-picture (PIP) — a main view with a secondary camera inset; **current phase is a single camera** (see "Current test phase" below), with PIP compositing added back once a second camera is on hand.
@@ -18,6 +20,52 @@ Status: **early scaffolding, moving toward a first bench test**. Current phase: 
    - Drive motor state: left/right direction + PWM
    - Compass / heading data
    - Speed, GPS latitude and longitude (planned — no GPS hardware chosen yet, see Open gaps)
+
+## Fork: LoRa/FPGA vehicle control architecture
+
+**Status: RTL and Python written, fully verified in simulation (11/11 testbenches pass via `fpga/Makefile`'s `make sim`), zero real hardware verification.** No FPGA, radio module, servo, or motor in this architecture has ever been touched. Treat every claim below as "internally consistent in simulation," not "works."
+
+**Why this fork exists**: the main branch's video/control both live on one Pi at WiFi range. This fork keeps video/HUD viewing on the Pi over WiFi exactly as the main branch does, but moves **all vehicle control** onto a dedicated long-range LoRa link between two FPGAs, so driving range isn't limited by WiFi. The Pi becomes purely a video + telemetry viewer with **zero control authority** — it never sends a command anywhere in this architecture.
+
+**Architecture**: an Alchitry Cu V2 (Lattice iCE40 HX, 7680 LUTs) at the base station reads operator input and transmits a command packet over a LoRa radio at a steady rate; a second Alchitry Cu V2 on the vehicle receives it and directly drives the 2 drive motors + 6 servos + reads the compass — fully replacing the ESP32's role, with the Pi/browser completely out of the control loop. The vehicle FPGA also feeds telemetry to the Pi over a **separate, one-way UART** purely for HUD display.
+
+```
+Base station:                              Vehicle:
+operator input (STUB, unresolved --        E220 LoRa ──► packet_decoder ──► servo_pwm x4, fire_load_pulse x2──► servo_pwm x2 ──► servos
+see open items below) ──► packet_encoder                              └──► deadman_timer ──► motor_pwm x2 ──► drive motors
+                       ──► E220 LoRa ══(air)══════════════════════════════► (same link, RX only by default)
+                                                                        i2c_master ──► compass
+                                                                        telemetry_uart_tx ──► Pi (control/vehicle_fpga_bridge.py) ──► websocket ──► browser canvas HUD (view-only, index.html's control surface was removed)
+```
+
+**LoRa hardware pivot (real, mid-session correction, not a hypothetical)**: the original plan called for a bare SX127x-family SPI-breakout LoRa module ("no microcontroller anywhere in the radio path"). The user's actual hardware pick, the **EBYTE E220-900T22D**, turned out to be a different chip family (LLCC68, SX1262-compatible SPI) *and*, more importantly, a "smart" module whose SPI is used internally by its own onboard MCU — the host interface is **UART** (default 9600 8N1), not SPI. This is architecturally the same shape of problem as the T-Higrow module rejected earlier in this session, except meaningfully better: the E220's MCU runs EBYTE's own fixed firmware, not custom bridge code the user would need to write. A from-scratch SX127x SPI driver was written, verified in simulation, and then **deleted** once this was discovered; `fpga/common/rtl/e220_driver.v` (UART-based) replaced it. If you see references to SPI/SX127x anywhere outside this note, they're stale.
+
+**Packet protocol** (`fpga/common/rtl/packet_defs.vh`): fixed 12-byte command packet — sync byte, sequence number, pan/tilt/focus/zoom, a flags byte (fire/load triggers + motor directions), 2 motor PWM bytes, a reserved byte, CRC16. The same packet doubles as the heartbeat (sent at a steady rate — no separate lightweight heartbeat format). Payload bytes are XOR-encrypted with a keystream (`fpga/common/rtl/keystream.v`) keyed by a shared secret (`KEYSTREAM_SEED`, currently a placeholder test value — **do not ship it as a real secret**) mixed with the sequence number. **Security note, stated plainly**: the CRC is NOT keyed — it catches accidental corruption but does not prove the sender knew the secret; a receiver with the wrong key still structurally accepts a packet (right sync, right CRC over whatever bytes arrived, non-duplicate sequence) and just decodes it to garbage-but-plausible-looking values rather than rejecting it outright. This scheme defeats passive sniffing and naive replay-of-a-captured-packet; it does **not** defend against active forgery by an attacker who never knew the key (CRC is public/unkeyed, so anyone can construct a structurally-valid packet). A keyed MAC or real AEAD cipher would be needed for that — noted as an open item, not built.
+
+**LUT budget — a real, measured finding**: `make stat-vehicle` (yosys `synth_ice40` against the iCE40 HX8K target, no place-and-route needed for a LUT count) reports **6993 of 7680 SB_LUT4 cells used — 91% utilization**, with zero margin for I/O buffer overhead or PnR routing pressure, let alone future features. Root cause, also measured (not guessed): `servo_pwm.v` (×6 instances) and `motor_pwm.v` (×2) dominate, because each instantiates its own constant-divisor division (`/ 180`, `/ 255`) that yosys's default flow implements as a genuine iterative divider rather than a cheap shift-and-add. `top_base.v` (no PWM generators) synthesizes to a comfortable 191 LUTs (2.5%) by contrast. **Practical consequence: assume a soft RISC-V core (picorv32/PicoSoC) does NOT fit alongside this design as currently written** — pure hand-written RTL is already at 91%. See `fpga/README.md` for the full writeup and the recommended (not yet implemented) fix: replace the divisions with a multiply-by-reciprocal approximation.
+
+**Repo layout for this fork**:
+- `fpga/common/rtl/` — shared: `packet_defs.vh`, `crc16.v`, `keystream.v`, `uart_engine.v`, `e220_driver.v`.
+- `fpga/vehicle/rtl/` — `top_vehicle.v` + `packet_decoder.v`, `deadman_timer.v`, `servo_pwm.v`, `motor_pwm.v`, `fire_load_pulse.v`, `i2c_master.v`, `telemetry_uart_tx.v`.
+- `fpga/base/rtl/` — `top_base.v` + `packet_encoder.v`. `operator_input` inside `top_base.v` is a **fixed-value stub** (pan/tilt centered, zero throttle, no fire/load) — see open items below.
+- `fpga/{common,vehicle,base}/sim/` — 11 testbenches, all passing (`make sim`).
+- `fpga/{vehicle,base}/constraints/*.pcf` — **placeholder pin files**, every line commented out; real Alchitry Cu V2 pin data was never looked up/confirmed. `make vehicle.bin`/`make base.bin` (full synth→PnR→bitstream) will not succeed until these are filled in.
+- `fpga/Makefile`, `fpga/README.md` — build/test flow and the LUT-budget writeup.
+- `control/vehicle_fpga_bridge.py` — replaces `control/esp32_bridge.py` on this branch: **telemetry-only**, no inbound command handling at all (verified live: sending it a command over the websocket is silently ignored, telemetry keeps flowing unaffected). Decodes `telemetry_uart_tx.v`'s 14-byte binary frame (its own CRC16 independently cross-checked against the RTL's, same test vector, same result) and re-serializes to the same JSON shape `index.html` already expects.
+- `web/static/index.html` — on-screen servo/motor sliders/buttons and all keyboard control handling (arrows/I/O/F/L/WASD/Escape) were **removed** on this branch (a silently-dead control is worse for operator trust than a visibly-absent one) — replaced with a plain "View-only" notice. The canvas HUD telemetry rendering (heading tape, servo readout, motor bars) is unchanged, now fed by the telemetry-only websocket.
+- `systemd/rc-hud-control.service` — repointed at `vehicle_fpga_bridge.py`. Note the base station is a **separate physical box** (base FPGA + operator input device) with no Pi and no systemd involvement at all — a real departure from the main branch's single-Pi-centric setup.
+- `control/esp32_bridge.py` / `control/esp32_firmware/esp32_firmware.ino` — kept in the branch, **unused** in this architecture (superseded by the FPGA RTL). Kept as reference since their `startPulse`/`updatePulse`/`applyMotor`/deadman-check logic are exactly what the vehicle FPGA's RTL was translated from — useful for side-by-side comparison, not stale cruft to delete casually.
+
+**Open items, not resolved by the code above**:
+- **Operator input device at the base station** — not chosen. `operator_input` in `top_base.v` is a fixed stub. A digital RC-style TX/RX pair is the simplest to wire (pure GPIO); an analog joystick needs an external ADC (the iCE40 HX has none onboard); a USB gamepad likely needs a small front-end MCU feeding the base FPGA over UART.
+- **Real `KEYSTREAM_SEED`** — `fpga/common/rtl/keystream.v`'s current value is a placeholder test constant, not a real secret. Both boards' bitstreams must be built with the same value for their link to decode each other.
+- **LUT budget fix** — the division-to-shift-multiply rewrite described above and in `fpga/README.md`, not yet done.
+- **Deadman timeout value** — `deadman_timer.v`'s `TIMEOUT_MS` (2000ms) is a placeholder; needs deriving from the real measured LoRa packet rate at whatever spreading factor/bandwidth gets chosen, once real radios exist.
+- **Servo behavior on deadman timeout** — currently mirrors the ESP32 (motors force-stop, servos just hold last position). Worth confirming this is still the right call given LoRa's likely-longer exposure time in a link-loss state vs. USB-serial.
+- **Real Alchitry Cu V2 pin assignments** — `.pcf` files are placeholders; nothing has been checked against Alchitry's actual pinout reference.
+- **`iceprog` vs `openFPGALoader` for flashing** — unverified, no hardware to test against.
+- **Frequency band (868MHz EU / 915MHz US)** — must be chosen to match the deployment region and match between both E220 modules; not fixed in the RTL (E220 ships pre-configured per part number, e.g. E220-900T22D vs. a 868MHz variant).
+- **Return/link-quality channel from vehicle back to base** — not built (`top_base.v`'s radio never enables RX). Telemetry reaches the Pi via the separate local UART, not over LoRa, by design; a minimal "link OK" indicator at the base station would need its own RX handling and deliberate TX/RX turnaround timing given LoRa's largely half-duplex nature.
 
 ## Current test phase: single camera + ESP32 bench test
 

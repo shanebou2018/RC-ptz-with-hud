@@ -1,15 +1,16 @@
 [Unit]
-Description=RC PTZ HUD - ESP32 serial control/telemetry bridge
+Description=RC PTZ HUD - vehicle FPGA telemetry bridge (LoRa/FPGA fork - view-only, no control authority)
 After=network.target
 
 [Service]
 Type=simple
 User=admincam
 WorkingDirectory=/home/admincam/RC-ptz-with-hud/control
-# --fake until the ESP32 is actually wired up and flashed (see CLAUDE.md).
-# Once it is, switch this to:
-#   esp32_bridge.py --port /dev/ttyUSB0 --baud 115200
-ExecStart=/home/admincam/RC-ptz-with-hud/control/.venv/bin/python esp32_bridge.py --fake
+# --fake until the vehicle FPGA is actually flashed and wired up to the Pi
+# (see fpga/README.md's sequencing section -- nothing past simulation has
+# been bench-tested yet). Once it is, switch this to:
+#   vehicle_fpga_bridge.py --port /dev/ttyUSB0 --baud 115200
+ExecStart=/home/admincam/RC-ptz-with-hud/control/.venv/bin/python vehicle_fpga_bridge.py --fake
 Restart=on-failure
 RestartSec=2
 
