@@ -10,6 +10,24 @@
 # set_io lora_uart_tx <real pin>
 # set_io lora_uart_rx <real pin>
 #
-# Plus whatever pins the eventual operator-input device needs --
-# top_base.v's operator_input is currently a fixed-value stub (see its
-# header comment), so there's nothing to constrain for it yet.
+# 12 pushbuttons (via the Br breakout board) -- see
+# operator_input_capture.v's header comment for the control mapping.
+# Wiring assumed: each button between the pin and GND, using the iCE40's
+# own internal pull-up (icestorm's pcf syntax for that is
+# `set_io -pullup yes <signal> <pin>`) so ACTIVE_LOW=1
+# (operator_input_capture.v's default) is correct with no external
+# resistor needed -- UNVERIFIED, confirm nextpnr-ice40/icepack actually
+# honor `-pullup yes` for this exact part before wiring buttons without
+# external pull-ups on real hardware.
+# set_io -pullup yes btn_pan_left     <real pin>
+# set_io -pullup yes btn_pan_right    <real pin>
+# set_io -pullup yes btn_tilt_up      <real pin>
+# set_io -pullup yes btn_tilt_down    <real pin>
+# set_io -pullup yes btn_zoom_in      <real pin>
+# set_io -pullup yes btn_zoom_out     <real pin>
+# set_io -pullup yes btn_fire         <real pin>
+# set_io -pullup yes btn_load         <real pin>
+# set_io -pullup yes btn_drive_fwd    <real pin>
+# set_io -pullup yes btn_drive_rev    <real pin>
+# set_io -pullup yes btn_drive_left   <real pin>
+# set_io -pullup yes btn_drive_right  <real pin>

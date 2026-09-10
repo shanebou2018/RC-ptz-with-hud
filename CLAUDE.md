@@ -31,9 +31,9 @@ Status: **early scaffolding, moving toward a first bench test**. Current phase: 
 
 ```
 Base station:                              Vehicle:
-operator input (STUB, unresolved --        E220 LoRa ──► packet_decoder ──► servo_pwm x4, fire_load_pulse x2──► servo_pwm x2 ──► servos
-see open items below) ──► packet_encoder                              └──► deadman_timer ──► motor_pwm x2 ──► drive motors
-                       ──► E220 LoRa ══(air)══════════════════════════════► (same link, RX only by default)
+12 pushbuttons ──► operator_input_capture   E220 LoRa ──► packet_decoder ──► servo_pwm x4, fire_load_pulse x2──► servo_pwm x2 ──► servos
+                                 ──► packet_encoder                    └──► deadman_timer ──► motor_pwm x2 ──► drive motors
+                                 ──► E220 LoRa ══(air)══════════════════════════════► (same link, RX only by default)
                                                                         i2c_master ──► compass
                                                                         telemetry_uart_tx ──► Pi (control/vehicle_fpga_bridge.py) ──► websocket ──► browser canvas HUD (view-only, index.html's control surface was removed)
 ```
@@ -47,7 +47,7 @@ see open items below) ──► packet_encoder                              └�
 **Repo layout for this fork**:
 - `fpga/common/rtl/` — shared: `packet_defs.vh`, `crc16.v`, `keystream.v`, `uart_engine.v`, `e220_driver.v`.
 - `fpga/vehicle/rtl/` — `top_vehicle.v` + `packet_decoder.v`, `deadman_timer.v`, `servo_pwm.v`, `motor_pwm.v`, `fire_load_pulse.v`, `i2c_master.v`, `telemetry_uart_tx.v`.
-- `fpga/base/rtl/` — `top_base.v` + `packet_encoder.v`. `operator_input` inside `top_base.v` is a **fixed-value stub** (pan/tilt centered, zero throttle, no fire/load) — see open items below.
+- `fpga/base/rtl/` — `top_base.v` + `packet_encoder.v` + `operator_input_capture.v` + `button_debounce.v`. Operator input is **12 physical pushbuttons** (chosen over an RC TX/RX pair, analog joystick, or USB gamepad — buttons keep the base station pure FPGA, no extra MCU/ADC): pan/tilt/zoom increment-while-held (mirrors the old browser HUD's arrow/I-O keys), fire/load momentary (one packet per press, not held-repeat), drive as 4-button tank-steer at a fixed `DRIVE_PWM`. Debounced via `button_debounce.v` (10ms default). Verified in simulation (`tb_button_debounce`, `tb_operator_input_capture`), including the fire/load one-packet-per-press timing and the tank-steer mix table — never tested against real buttons.
 - `fpga/{common,vehicle,base}/sim/` — 11 testbenches, all passing (`make sim`).
 - `fpga/{vehicle,base}/constraints/*.pcf` — **placeholder pin files**, every line commented out; real Alchitry Cu V2 pin data was never looked up/confirmed. `make vehicle.bin`/`make base.bin` (full synth→PnR→bitstream) will not succeed until these are filled in.
 - `fpga/Makefile`, `fpga/README.md` — build/test flow and the LUT-budget writeup.
@@ -57,7 +57,7 @@ see open items below) ──► packet_encoder                              └�
 - `control/esp32_bridge.py` / `control/esp32_firmware/esp32_firmware.ino` — kept in the branch, **unused** in this architecture (superseded by the FPGA RTL). Kept as reference since their `startPulse`/`updatePulse`/`applyMotor`/deadman-check logic are exactly what the vehicle FPGA's RTL was translated from — useful for side-by-side comparison, not stale cruft to delete casually.
 
 **Open items, not resolved by the code above**:
-- **Operator input device at the base station** — not chosen. `operator_input` in `top_base.v` is a fixed stub. A digital RC-style TX/RX pair is the simplest to wire (pure GPIO); an analog joystick needs an external ADC (the iCE40 HX has none onboard); a USB gamepad likely needs a small front-end MCU feeding the base FPGA over UART.
+- **Operator input device at the base station** — resolved: 12 pushbuttons (see `fpga/base/rtl/operator_input_capture.v`). Still unresolved: the exact physical button hardware/enclosure, and whether `DRIVE_PWM` (150, fixed single-speed) and `STEP_DEG`/`STEP_TICK_MS` (2°/50ms) feel right once real hardware exists — all tunable constants at the top of the file, not yet bench-tuned.
 - **Real `KEYSTREAM_SEED`** — `fpga/common/rtl/keystream.v`'s current value is a placeholder test constant, not a real secret. Both boards' bitstreams must be built with the same value for their link to decode each other.
 - **LUT budget fix** — the division-to-shift-multiply rewrite described above and in `fpga/README.md`, not yet done.
 - **Deadman timeout value** — `deadman_timer.v`'s `TIMEOUT_MS` (2000ms) is a placeholder; needs deriving from the real measured LoRa packet rate at whatever spreading factor/bandwidth gets chosen, once real radios exist.

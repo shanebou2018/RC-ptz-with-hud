@@ -27,8 +27,8 @@ this is a guess, not a confirmed fact.
 make sim
 ```
 
-Runs all 11 testbenches under `common/sim/`, `vehicle/sim/`, `base/sim/`.
-As of this writing, all 11 pass:
+Runs all 13 testbenches under `common/sim/`, `vehicle/sim/`, `base/sim/`.
+As of this writing, all 13 pass:
 
 - `tb_crc16` -- CRC-16/CCITT-FALSE against the standard test vector, plus a corruption-detection check
 - `tb_keystream` -- determinism, seed/seq sensitivity, XOR round-trip, wrong-seed-fails-to-recover
@@ -39,6 +39,8 @@ As of this writing, all 11 pass:
 - `tb_uart_engine`, `tb_e220_driver` -- UART loopback, and a full driver+driver (via two bench "radio" models) round trip in both directions
 - `tb_i2c_master` -- full read transaction against a bench I2C slave model, plus a wrong-address NACK case
 - `tb_telemetry_uart_tx` -- frame layout, field values, CRC, against a plain UART receiver
+- `tb_button_debounce` -- bounce rejection, sustained-press registration, release
+- `tb_operator_input_capture` -- pan/tilt/zoom increment-while-held + clamping, fire/load one-packet-per-press timing (including that a second `send_pulse` without a new press doesn't re-fire), the 4-button tank-steer mix table
 
 None of this is hardware verification -- it proves the RTL's logic is
 internally consistent, not that it works against a real SX-family radio,
@@ -74,8 +76,10 @@ implementation would use. `i2c_master.v`, `packet_decoder.v`,
 `fire_load_pulse.v` are all individually small (122-712 cells each) --
 they are not the problem.
 
-`top_base.v` (no servo/motor PWM instances at all) synthesizes to only
-191 LUTs -- 2.5% utilization, comfortable.
+`top_base.v` (no servo/motor PWM instances at all -- with the full 12-button
+`operator_input_capture.v`/`button_debounce.v` now wired in, not the earlier
+fixed-value stub) synthesizes to 736 LUTs -- 9.6% utilization, still
+comfortable.
 
 **Recommended next step, not yet done**: replace the `/ 180` and `/ 255`
 divisions in `servo_pwm.v`/`motor_pwm.v` with a multiply-by-reciprocal
@@ -128,7 +132,7 @@ for what this scheme does and doesn't protect against.
 4. Vehicle-side actuation bench test -- **done in simulation** (`tb_servo_pwm`, `tb_motor_pwm`, `tb_fire_load_pulse`), not against real servos/motors.
 5. Deadman timer integration -- **done in simulation** (`tb_deadman_timer`), not against a real link.
 6. Telemetry link to the Pi -- RTL + `control/vehicle_fpga_bridge.py` both written and independently tested (`tb_telemetry_uart_tx`, and the Python side has its own CRC/framing logic mirroring the RTL); the two have never talked to each other over a real UART.
-7. Base station operator input -- **not done**, blocked on the open question (see CLAUDE.md) of what physical input device to use. `top_base.v`'s `operator_input` is a fixed-value stub.
+7. Base station operator input -- **done in simulation** (`tb_button_debounce`, `tb_operator_input_capture`): 12 pushbuttons, debounced, mapped to pan/tilt/zoom (increment-while-held), fire/load (momentary), and 4-button tank-steer drive at a fixed speed. Real hardware (actual buttons, actual `DRIVE_PWM`/`STEP_DEG` feel) not tested.
 8. HUD control-surface cleanup -- done (see CLAUDE.md's fork section and `web/static/index.html`).
 9. Full integration bench test -- **not done**, no hardware.
 10. Optional return channel -- **not built**, per the plan's open question 5 (no RX path on the base station's radio in the current design).
