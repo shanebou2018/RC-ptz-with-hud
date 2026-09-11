@@ -54,6 +54,7 @@
 #include <ESP32Servo.h>
 #include <lora_packet.h>
 #include <string.h>  // strcmp() below
+#include "pulse_state.h"  // PulseState struct -- see that file's header comment for why it's not defined inline here
 
 // =========================================================================
 // SAFETY LIMITS -- same philosophy as esp32_firmware.ino. Keep
@@ -138,10 +139,8 @@ void applyMotor(const char *side, int dir, int pwm) {
 }
 
 // ---- Fire/load one-shot pulse state machine (identical to esp32_firmware.ino) --
-struct PulseState {
-  bool active = false;
-  unsigned long startMs = 0;
-};
+// PulseState itself is defined in pulse_state.h (this sketch folder), not
+// inline here -- see that file's header comment for why.
 PulseState firePulse, loadPulse;
 
 void startPulse(PulseState &state, const char *name, int angle) {
